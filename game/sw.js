@@ -1,6 +1,6 @@
 // Service Worker for Fruit Merge Game
 // Update this version number whenever you make changes to force cache refresh
-const VERSION = '1.0.3';
+const VERSION = '1.0.0';
 const CACHE_NAME = `fruit-merge-v${VERSION}`;
 const urlsToCache = [
   './index.html',
