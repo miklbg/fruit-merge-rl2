@@ -174,7 +174,7 @@ export function createFastSimController(gameContext) {
                         stepCount++;
                         
                         // Yield to event loop periodically to prevent blocking
-                        if (stepCount % 100 === 0) {
+                        if (stepCount % 500 === 0) {
                             await new Promise(resolve => setTimeout(resolve, 0));
                         }
                         
@@ -211,8 +211,9 @@ export function createFastSimController(gameContext) {
             window.RL.setHeadlessMode(false);
             
             // Reset the game to leave it in a clean state with rendering restored
+            // RL.reset() calls handleRestart() which calls initGame()
+            // initGame() restarts Render.run() and Runner.run() automatically
             try {
-                // Use the regular reset (not resetEpisode) to restore full rendering
                 if (typeof window.RL.reset === 'function') {
                     window.RL.reset();
                 }
