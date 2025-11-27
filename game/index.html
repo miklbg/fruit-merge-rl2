@@ -1093,8 +1093,8 @@
                     // --- Expose RL State Extraction API ---
                     // Maximum number of board fruits to include in state
                     const RL_MAX_BOARD_FRUITS = 30;
-                    // Total state length: 3 (current fruit) + 30 * 3 (board fruits) = 93
-                    const RL_STATE_LENGTH = 3 + RL_MAX_BOARD_FRUITS * 3;
+                    // Total state length: 3 (current fruit) + 1 (next fruit) + 1 (booster) + 30 * 3 (board fruits) = 95
+                    const RL_STATE_LENGTH = 3 + 1 + 1 + RL_MAX_BOARD_FRUITS * 3;
                     
                     window.RL = window.RL || {};
                     
@@ -1102,17 +1102,19 @@
                      * Get a fixed-length numeric array describing the current game state.
                      * Returns a deterministic, fixed-length state vector for RL model input.
                      * 
-                     * State format (93 values total):
+                     * State format (95 values total):
                      * - [0]: Current falling fruit normalized X position (0-1)
                      * - [1]: Current falling fruit normalized Y position (0-1)
                      * - [2]: Current falling fruit type ID normalized (0-1, where 0 = level 0, 1 = max level)
-                     * - [3..92]: Board fruits (up to 30), each with 3 values:
+                     * - [3]: Next fruit type ID normalized (0-1)
+                     * - [4]: Booster available (1 if available, 0 if not)
+                     * - [5..94]: Board fruits (up to 30), each with 3 values:
                      *   - Normalized X position (0-1)
                      *   - Normalized Y position (0-1)
                      *   - Normalized type ID (0-1)
                      *   Zero-padded if fewer than 30 fruits exist.
                      * 
-                     * @returns {number[]} Fixed-length array of 93 numeric values
+                     * @returns {number[]} Fixed-length array of 95 numeric values
                      */
                     window.RL.getState = function() {
                         const state = new Array(RL_STATE_LENGTH).fill(0);
@@ -1126,6 +1128,14 @@
                         state[1] = dropAreaY / gameWorldHeight;
                         // Normalize fruit type: 0 = level 0 (blueberry), 1 = max level (watermelon)
                         state[2] = MAX_FRUIT_LEVEL > 0 ? currentFruitLevel / MAX_FRUIT_LEVEL : 0;
+                        
+                        // --- Next fruit ---
+                        // Normalize fruit type: 0 = level 0, 1 = max level
+                        state[3] = MAX_FRUIT_LEVEL > 0 ? nextFruitLevel / MAX_FRUIT_LEVEL : 0;
+                        
+                        // --- Booster available ---
+                        // 1 if booster is unlocked and not on cooldown, 0 otherwise
+                        state[4] = (boosterUnlocked && boosterCooldownCount === 0) ? 1 : 0;
                         
                         // --- Board fruits (fruits resting in the scene) ---
                         // Get all fruit bodies from the physics world
@@ -1146,9 +1156,9 @@
                             boardFruits = boardFruits.slice(0, RL_MAX_BOARD_FRUITS);
                         }
                         
-                        // Fill in board fruit data
+                        // Fill in board fruit data (starting at index 5)
                         for (let i = 0; i < boardFruits.length; i++) {
-                            const baseIndex = 3 + i * 3;
+                            const baseIndex = 5 + i * 3;
                             state[baseIndex] = boardFruits[i].x;
                             state[baseIndex + 1] = boardFruits[i].y;
                             state[baseIndex + 2] = boardFruits[i].level;
