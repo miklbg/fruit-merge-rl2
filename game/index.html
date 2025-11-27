@@ -488,6 +488,12 @@
     <script type="module">
         // Import Web Audio BGM controller
         import { createBgmController } from './audio/web-audio-bgm.js';
+        
+        // Import Random Agent Test Harness for RL environment verification
+        import { startRandomAgentTest } from './randomAgentTest.js';
+        
+        // Expose global function for console testing
+        window.runRandomAgent = (options) => startRandomAgentTest(options);
 
         // Wait for the *entire page* to load
         window.onload = () => {
