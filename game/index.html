@@ -1066,6 +1066,29 @@
                     setupResizeObserver();
                     setupVisibilityHandlers();
                     setupPauseModal();
+                    
+                    // --- Expose Direct Control API for AI/testing ---
+                    window.gameAI = {
+                        /**
+                         * Move the current fruit horizontally.
+                         * @param {number} normalizedX - A value between 0 (left edge) and 1 (right edge).
+                         */
+                        moveTo(normalizedX) {
+                            // Clamp normalizedX to 0-1 range
+                            const clampedX = Math.max(0, Math.min(1, normalizedX));
+                            // Convert normalized position to game world coordinates
+                            const worldX = clampedX * gameWorldWidth;
+                            // Call moveFruit with isInternalCall=true since worldX is in game world coords
+                            moveFruit(worldX, true);
+                        },
+                        
+                        /**
+                         * Drop the current fruit at its current horizontal position.
+                         */
+                        drop() {
+                            dropFruit();
+                        }
+                    };
                 }
             }, 50);
 
