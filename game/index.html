@@ -1167,6 +1167,44 @@
                         
                         return state;
                     };
+                    
+                    /**
+                     * Execute a discrete RL action.
+                     * 
+                     * Action space (4 discrete actions):
+                     * - 0: Move fruit left by a small amount (dx = 0.04)
+                     * - 1: Move fruit right by a small amount (dx = 0.04)
+                     * - 2: Move fruit to center (normalized X = 0.5)
+                     * - 3: Drop fruit
+                     * 
+                     * @param {number} actionIndex - Action index (0-3)
+                     */
+                    window.RL.step = function(actionIndex) {
+                        const dx = 0.04; // Small horizontal step size
+                        
+                        // Get current normalized X position
+                        const currentXNorm = currentPreviewX / gameWorldWidth;
+                        
+                        switch (actionIndex) {
+                            case 0: // Move left
+                                const leftX = Math.max(0, currentXNorm - dx);
+                                window.gameAI.moveTo(leftX);
+                                break;
+                            case 1: // Move right
+                                const rightX = Math.min(1, currentXNorm + dx);
+                                window.gameAI.moveTo(rightX);
+                                break;
+                            case 2: // Move to center
+                                window.gameAI.moveTo(0.5);
+                                break;
+                            case 3: // Drop fruit
+                                window.gameAI.drop();
+                                break;
+                            default:
+                                // Invalid action index - do nothing
+                                break;
+                        }
+                    };
                 }
             }, 50);
 
