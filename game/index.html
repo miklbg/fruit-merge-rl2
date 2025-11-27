@@ -492,6 +492,9 @@
         // Import Random Agent Test Harness for RL environment verification
         import { startRandomAgentTest } from './randomAgentTest.js';
         
+        // Import FastSim for headless simulation
+        import { initFastSim } from './fastSim.js';
+        
         // Expose global function for console testing
         window.runRandomAgent = (options) => startRandomAgentTest(options);
 
@@ -629,6 +632,7 @@
             const BOOSTER_UNLOCK_LEVEL = 5;
             let boosterReenableTimeout = null;
             let isGameOverAnimating = false; // Flag to prevent actions during game over animation
+            let isHeadlessMode = false; // Flag to disable rendering and audio during FastSim
             
             function updateBoosterIndicator() {
                 if (!boosterUnlocked) {
@@ -726,7 +730,7 @@
             }
 
             function playDropSound() {
-                if (!areSoundsEnabled) return;
+                if (!areSoundsEnabled || isHeadlessMode) return;
                 initAudioContext();
                 const oscillator = audioContext.createOscillator();
                 const gainNode = audioContext.createGain();
@@ -746,7 +750,7 @@
             }
 
             function playMergeSound() {
-                if (!areSoundsEnabled) return;
+                if (!areSoundsEnabled || isHeadlessMode) return;
                 initAudioContext();
                 const oscillator1 = audioContext.createOscillator();
                 const oscillator2 = audioContext.createOscillator();
@@ -777,7 +781,7 @@
             }
 
             function playWarningSound() {
-                if (!areSoundsEnabled) return;
+                if (!areSoundsEnabled || isHeadlessMode) return;
                 initAudioContext();
                 
                 const now = Date.now();
@@ -810,7 +814,7 @@
             }
 
             function playBoosterAvailableSound() {
-                if (!areSoundsEnabled) return;
+                if (!areSoundsEnabled || isHeadlessMode) return;
                 initAudioContext();
                 
                 const notes = [
@@ -844,7 +848,7 @@
             }
 
             function playBoosterUsedSound() {
-                if (!areSoundsEnabled) return;
+                if (!areSoundsEnabled || isHeadlessMode) return;
                 initAudioContext();
                 
                 const oscillator = audioContext.createOscillator();
@@ -867,7 +871,7 @@
             }
 
             function playGameOverSound() {
-                if (!areSoundsEnabled) return;
+                if (!areSoundsEnabled || isHeadlessMode) return;
                 initAudioContext();
                 
                 const notes = [
@@ -902,7 +906,7 @@
             }
 
             function startBackgroundMusic() {
-                if (!isMusicEnabled) return;
+                if (!isMusicEnabled || isHeadlessMode) return;
                 initBackgroundMusic();
                 if (bgmController && !isMusicPaused) {
                     bgmController.play().catch(() => {});
@@ -1275,6 +1279,128 @@
                         window.RL._episodeReward += reward;
                         return reward;
                     };
+                    
+                    /**
+                     * Reset the game for a new episode.
+                     * This is a lighter-weight reset specifically for RL training.
+                     * In headless mode, it resets game state without full reinitialization.
+                     */
+                    window.RL.resetEpisode = function() {
+                        // Reset internal reward tracking
+                        window.RL._episodeReward = 0;
+                        window.RL._lastScore = 0;
+                        
+                        if (isHeadlessMode) {
+                            // Lightweight reset: clear physics bodies and reset game state
+                            // without full reinitialization of renderer
+                            
+                            // Clear all fruits from the world
+                            const fruits = Composite.allBodies(world).filter(body => body.label === 'fruit');
+                            fruits.forEach(body => {
+                                World.remove(world, body);
+                            });
+                            
+                            // Reset game state variables
+                            score = 0;
+                            isGameOver = false;
+                            isDropping = false;
+                            isGameOverAnimating = false;
+                            lastDropTime = 0;
+                            lastDroppedFruit = null;
+                            currentGameMaxFruit = -1;
+                            boosterCooldownCount = 0;
+                            boosterUnlocked = false;
+                            isWarningActive = false;
+                            warningLineThickness = 2;
+                            warningAnimationFrame = 0;
+                            lastWarningSound = 0;
+                            bodiesToRemoveSet.clear();
+                            bodiesToAddArray = [];
+                            
+                            // Clear timeouts
+                            if (collisionTimeout) {
+                                clearTimeout(collisionTimeout);
+                                collisionTimeout = null;
+                            }
+                            if (spawnTimeout) {
+                                clearTimeout(spawnTimeout);
+                                spawnTimeout = null;
+                            }
+                            if (boosterReenableTimeout) {
+                                clearTimeout(boosterReenableTimeout);
+                                boosterReenableTimeout = null;
+                            }
+                            gameOverTimeouts.forEach(timeout => clearTimeout(timeout));
+                            gameOverTimeouts = [];
+                            
+                            // Re-add ground if it was removed during game over
+                            const groundExists = Composite.allBodies(world).some(body => body.label === 'ground');
+                            if (!groundExists) {
+                                const wallOptions = {
+                                    isStatic: true,
+                                    restitution: 0.1,
+                                    friction: 0.2,
+                                    render: { 
+                                        fillStyle: 'transparent',
+                                        strokeStyle: 'transparent',
+                                        lineWidth: 0
+                                    }
+                                };
+                                const ground = Bodies.rectangle(
+                                    gameWorldWidth / 2, 
+                                    gameWorldHeight - GROUND_HEIGHT / 2, 
+                                    gameWorldWidth, 
+                                    GROUND_HEIGHT, 
+                                    { ...wallOptions, label: 'ground' }
+                                );
+                                World.add(world, ground);
+                            }
+                            
+                            // Spawn new fruits
+                            currentPreviewX = gameWorldWidth / 2;
+                            spawnNextFruit();
+                            currentFruitLevel = nextFruitLevel;
+                            spawnNextFruit();
+                        } else {
+                            // Full reset using existing handleRestart
+                            handleRestart();
+                            
+                            // Hide pause modal
+                            if (!pauseModal.classList.contains('hidden')) {
+                                pauseModal.classList.add('hidden');
+                            }
+                        }
+                    };
+                    
+                    /**
+                     * Set headless mode for fast simulation.
+                     * In headless mode, rendering, audio, and UI updates are skipped.
+                     * 
+                     * @param {boolean} enabled - True to enable headless mode
+                     */
+                    window.RL.setHeadlessMode = function(enabled) {
+                        isHeadlessMode = enabled;
+                    };
+                    
+                    /**
+                     * Check if headless mode is enabled.
+                     * 
+                     * @returns {boolean} True if headless mode is enabled
+                     */
+                    window.RL.isHeadlessMode = function() {
+                        return isHeadlessMode;
+                    };
+                    
+                    // --- Initialize FastSim for headless simulation ---
+                    // Provide game context accessors that return current instances
+                    // (instances may change after game reset/restart)
+                    initFastSim({
+                        engine: () => engine,
+                        runner: () => runner,
+                        render: () => render,
+                        getScore: () => score,
+                        getIsGameOver: () => isGameOver
+                    });
                 }
             }, 50);
 
@@ -1827,6 +1953,8 @@
 
             // --- Confetti Effect ---
             function createConfetti(worldX, worldY, color1, color2) {
+                // Skip confetti in headless mode
+                if (isHeadlessMode) return;
                 // Convert game world coordinates to viewport coordinates
                 const viewportX = worldToViewportX(worldX);
                 const viewportY = worldToViewportY(worldY);
@@ -1876,7 +2004,7 @@
             
             // --- Save Game State ---
             function saveGameState() {
-                if (isGameOver || !world) return;
+                if (isGameOver || !world || isHeadlessMode) return;
 
                 const fruits = Composite.allBodies(world)
                     .filter(body => body.label === 'fruit')
