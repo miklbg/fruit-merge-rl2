@@ -1851,9 +1851,9 @@
             function dropFruit() {
                 if (isGameOver || isDropping) return;
 
-                // Check cooldown period to limit drop frequency
+                // Check cooldown period to limit drop frequency (skip in headless mode)
                 const currentTime = Date.now();
-                if (currentTime - lastDropTime < DROP_COOLDOWN_MS) {
+                if (!isHeadlessMode && currentTime - lastDropTime < DROP_COOLDOWN_MS) {
                     return; // Still in cooldown period
                 }
 
@@ -1940,15 +1940,25 @@
                     collisionTimeout = null;
                 }, 1500);
 
-                spawnTimeout = setTimeout(() => {
+                // In headless mode, spawn next fruit immediately without timeout
+                if (isHeadlessMode) {
                     if (!isGameOver) {
-                        spawnCurrentFruit(); 
-                        spawnNextFruit(); 
-                        previewFruitEl.style.opacity = '0.8';
+                        // Spawn next fruit synchronously (skip UI updates in headless mode)
+                        currentFruitLevel = nextFruitLevel;
+                        nextFruitLevel = Math.floor(Math.random() * STARTING_FRUIT_LEVELS);
                         isDropping = false;
                     }
-                    spawnTimeout = null;
-                }, DROP_COOLDOWN_MS); // Show preview fruit only after cooldown completes
+                } else {
+                    spawnTimeout = setTimeout(() => {
+                        if (!isGameOver) {
+                            spawnCurrentFruit(); 
+                            spawnNextFruit(); 
+                            previewFruitEl.style.opacity = '0.8';
+                            isDropping = false;
+                        }
+                        spawnTimeout = null;
+                    }, DROP_COOLDOWN_MS); // Show preview fruit only after cooldown completes
+                }
             }
 
             // --- Confetti Effect ---
