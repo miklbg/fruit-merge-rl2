@@ -1205,6 +1205,62 @@
                                 break;
                         }
                     };
+                    
+                    // --- RL Environment Control API ---
+                    // Internal fields for reward tracking
+                    window.RL._episodeReward = 0;
+                    window.RL._lastScore = 0;
+                    
+                    /**
+                     * Reset the game to a fresh episode state.
+                     * Clears all fruits, scores, and physics bodies from the scene.
+                     * Spawns the next-dropping fruit as in a normal game start.
+                     * Resets internal reward tracking variables.
+                     */
+                    window.RL.reset = function() {
+                        // Reset internal reward tracking
+                        window.RL._episodeReward = 0;
+                        window.RL._lastScore = 0;
+                        
+                        // Use the existing handleRestart function to properly reset the game
+                        // This clears all fruits, physics bodies, score, etc.
+                        handleRestart();
+                        
+                        // After restart, the game shows pause modal by default for new games
+                        // For RL training, we want to auto-resume so the game is playable
+                        if (!pauseModal.classList.contains('hidden')) {
+                            pauseModal.classList.add('hidden');
+                        }
+                        
+                        // Ensure game is not in game over state
+                        // (handleRestart already resets isGameOver via initGame)
+                    };
+                    
+                    /**
+                     * Check if the game is in a terminal state.
+                     * Terminal state occurs when game-over is triggered (fruits stacked above the red line).
+                     * 
+                     * @returns {boolean} True if game is over, false otherwise
+                     */
+                    window.RL.isTerminal = function() {
+                        return isGameOver;
+                    };
+                    
+                    /**
+                     * Get the reward based on score change since last call.
+                     * Reward = currentScore - _lastScore
+                     * Updates _lastScore to current score after computing reward.
+                     * Accumulates into _episodeReward.
+                     * 
+                     * @returns {number} Reward value (score difference since last call)
+                     */
+                    window.RL.getReward = function() {
+                        const currentScore = score;
+                        const reward = currentScore - window.RL._lastScore;
+                        window.RL._lastScore = currentScore;
+                        window.RL._episodeReward += reward;
+                        return reward;
+                    };
                 }
             }, 50);
 
