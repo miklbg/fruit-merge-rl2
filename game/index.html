@@ -1108,13 +1108,13 @@
                      * Get a fixed-length numeric array describing the current game state.
                      * Returns a deterministic, fixed-length state vector for RL model input.
                      * 
-                     * State format (95 values total):
+                     * State format (155 values total):
                      * - [0]: Current falling fruit normalized X position (0-1)
                      * - [1]: Current falling fruit normalized Y position (0-1)
                      * - [2]: Current falling fruit type ID normalized (0-1, where 0 = level 0, 1 = max level)
                      * - [3]: Next fruit type ID normalized (0-1)
                      * - [4]: Booster available (1 if available, 0 if not)
-                     * - [5..94]: Board fruits (up to 50), each with 3 values:
+                     * - [5..154]: Board fruits (up to 50), each with 3 values:
                      *   - Normalized X position (0-1)
                      *   - Normalized Y position (0-1)
                      *   - Normalized type ID (0-1)
@@ -1125,19 +1125,27 @@
                     window.RL.getState = function() {
                         const state = new Array(RL_STATE_LENGTH).fill(0);
                         
+                        // Helper function to clamp a value to [0, 1] range
+                        const clamp01 = (val) => Math.max(0, Math.min(1, val));
+                        
+                        // If game is over, return zeros (fixed-length array already filled with 0)
+                        if (isGameOver) {
+                            return state;
+                        }
+                        
                         // --- Current falling fruit ---
                         // Normalize X: 0 = left wall, 1 = right wall
-                        state[0] = currentPreviewX / gameWorldWidth;
+                        state[0] = clamp01(currentPreviewX / gameWorldWidth);
                         // Normalize Y: 0 = top, 1 = bottom
                         // Note: The current fruit is always at the drop area (waiting to be dropped)
                         // Once dropped, it becomes a board fruit tracked in the board fruits section
-                        state[1] = dropAreaY / gameWorldHeight;
+                        state[1] = clamp01(dropAreaY / gameWorldHeight);
                         // Normalize fruit type: 0 = level 0 (blueberry), 1 = max level (watermelon)
-                        state[2] = MAX_FRUIT_LEVEL > 0 ? currentFruitLevel / MAX_FRUIT_LEVEL : 0;
+                        state[2] = clamp01(MAX_FRUIT_LEVEL > 0 ? currentFruitLevel / MAX_FRUIT_LEVEL : 0);
                         
                         // --- Next fruit ---
                         // Normalize fruit type: 0 = level 0, 1 = max level
-                        state[3] = MAX_FRUIT_LEVEL > 0 ? nextFruitLevel / MAX_FRUIT_LEVEL : 0;
+                        state[3] = clamp01(MAX_FRUIT_LEVEL > 0 ? nextFruitLevel / MAX_FRUIT_LEVEL : 0);
                         
                         // --- Booster available ---
                         // 1 if booster is unlocked and not on cooldown, 0 otherwise
@@ -1150,9 +1158,9 @@
                             boardFruits = Composite.allBodies(world)
                                 .filter(body => body.label === 'fruit')
                                 .map(body => ({
-                                    x: body.position.x / gameWorldWidth,
-                                    y: body.position.y / gameWorldHeight,
-                                    level: MAX_FRUIT_LEVEL > 0 ? body.fruitLevel / MAX_FRUIT_LEVEL : 0
+                                    x: clamp01(body.position.x / gameWorldWidth),
+                                    y: clamp01(body.position.y / gameWorldHeight),
+                                    level: clamp01(MAX_FRUIT_LEVEL > 0 ? body.fruitLevel / MAX_FRUIT_LEVEL : 0)
                                 }));
                             
                             // Sort by Y position (bottom to top) for consistent ordering
