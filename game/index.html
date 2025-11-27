@@ -1092,8 +1092,8 @@
                     
                     // --- Expose RL State Extraction API ---
                     // Maximum number of board fruits to include in state
-                    const RL_MAX_BOARD_FRUITS = 30;
-                    // Total state length: 3 (current fruit) + 1 (next fruit) + 1 (booster) + 30 * 3 (board fruits) = 95
+                    const RL_MAX_BOARD_FRUITS = 50;
+                    // Total state length: 3 (current fruit) + 1 (next fruit) + 1 (booster) + 50 * 3 (board fruits) = 155
                     const RL_STATE_LENGTH = 3 + 1 + 1 + RL_MAX_BOARD_FRUITS * 3;
                     
                     window.RL = window.RL || {};
@@ -1108,13 +1108,13 @@
                      * - [2]: Current falling fruit type ID normalized (0-1, where 0 = level 0, 1 = max level)
                      * - [3]: Next fruit type ID normalized (0-1)
                      * - [4]: Booster available (1 if available, 0 if not)
-                     * - [5..94]: Board fruits (up to 30), each with 3 values:
+                     * - [5..94]: Board fruits (up to 50), each with 3 values:
                      *   - Normalized X position (0-1)
                      *   - Normalized Y position (0-1)
                      *   - Normalized type ID (0-1)
-                     *   Zero-padded if fewer than 30 fruits exist.
+                     *   Zero-padded if fewer than 50 fruits exist.
                      * 
-                     * @returns {number[]} Fixed-length array of 95 numeric values
+                     * @returns {number[]} Fixed-length array of 155 numeric values
                      */
                     window.RL.getState = function() {
                         const state = new Array(RL_STATE_LENGTH).fill(0);
