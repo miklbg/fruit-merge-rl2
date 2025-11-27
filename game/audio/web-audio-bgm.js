@@ -65,7 +65,7 @@ export function createBgmController({ audioElOrSrc, defaultGain = 0.25, loop = t
         if (AudioContextClass) {
             audioContext = new AudioContextClass();
             isWebAudioAvailable = true;
-            console.log('Web Audio API initialized for background music');
+            //console.log('Web Audio API initialized for background music');
         }
     } catch (error) {
         console.warn('Web Audio API not available, falling back to HTMLAudioElement.volume:', error);
@@ -80,7 +80,7 @@ export function createBgmController({ audioElOrSrc, defaultGain = 0.25, loop = t
             gainNode.gain.value = currentGain;
             gainNode.connect(audioContext.destination);
 
-            console.log(`Web Audio BGM initialized with gain ${currentGain} (${linearToDb(currentGain).toFixed(2)}dB)`);
+            //console.log(`Web Audio BGM initialized with gain ${currentGain} (${linearToDb(currentGain).toFixed(2)}dB)`);
         } catch (error) {
             console.warn('Failed to setup Web Audio pipeline:', error);
             isWebAudioAvailable = false;
@@ -90,7 +90,7 @@ export function createBgmController({ audioElOrSrc, defaultGain = 0.25, loop = t
     // Fallback to HTMLAudioElement.volume if Web Audio is not available
     if (!isWebAudioAvailable) {
         audioElement.volume = currentGain;
-        console.log(`Using HTMLAudioElement.volume fallback with gain ${currentGain}`);
+        //console.log(`Using HTMLAudioElement.volume fallback with gain ${currentGain}`);
     }
 
     /**
@@ -105,7 +105,7 @@ export function createBgmController({ audioElOrSrc, defaultGain = 0.25, loop = t
             sourceNode = audioContext.createMediaElementSource(audioElement);
             sourceNode.connect(gainNode);
             hasCreatedMediaElementSource = true;
-            console.log('MediaElementSource connected to Web Audio graph');
+            //console.log('MediaElementSource connected to Web Audio graph');
         } catch (error) {
             console.warn('Failed to create MediaElementSource (may already exist):', error);
             hasCreatedMediaElementSource = true; // Mark as attempted to avoid retries
@@ -121,7 +121,7 @@ export function createBgmController({ audioElOrSrc, defaultGain = 0.25, loop = t
         if (audioContext.state === 'suspended') {
             try {
                 await audioContext.resume();
-                console.log('AudioContext resumed/unlocked');
+                //console.log('AudioContext resumed/unlocked');
             } catch (error) {
                 console.warn('Failed to resume AudioContext:', error);
             }
@@ -145,7 +145,7 @@ export function createBgmController({ audioElOrSrc, defaultGain = 0.25, loop = t
             if (playPromise !== undefined) {
                 await playPromise;
                 isPlaying = true;
-                console.log('Background music started');
+                //console.log('Background music started');
             }
         } catch (error) {
             console.warn('Failed to play background music:', error);
@@ -160,7 +160,7 @@ export function createBgmController({ audioElOrSrc, defaultGain = 0.25, loop = t
         try {
             audioElement.pause();
             isPlaying = false;
-            console.log('Background music paused');
+            //console.log('Background music paused');
         } catch (error) {
             console.warn('Failed to pause background music:', error);
         }
@@ -179,7 +179,7 @@ export function createBgmController({ audioElOrSrc, defaultGain = 0.25, loop = t
             audioElement.volume = currentGain;
         }
 
-        console.log(`BGM gain set to ${currentGain} (${linearToDb(currentGain).toFixed(2)}dB)`);
+        //console.log(`BGM gain set to ${currentGain} (${linearToDb(currentGain).toFixed(2)}dB)`);
     }
 
     /**
@@ -220,7 +220,7 @@ export function createBgmController({ audioElOrSrc, defaultGain = 0.25, loop = t
             if (unlocked) return;
             unlocked = true;
 
-            console.log('User gesture detected, unlocking audio...');
+            //console.log('User gesture detected, unlocking audio...');
             await unlockAudioContext();
             connectAudioElement();
 
@@ -235,7 +235,7 @@ export function createBgmController({ audioElOrSrc, defaultGain = 0.25, loop = t
             document.addEventListener(event, unlockHandler, { capture: true, once: false });
         });
 
-        console.log('Audio unlock listeners installed');
+        //console.log('Audio unlock listeners installed');
 
         // Return cleanup function
         return () => {
