@@ -239,6 +239,13 @@ export function initTraining(context) {
         // Enable headless mode
         window.RL.setHeadlessMode(true);
         
+        // Validate Matter.js is available
+        if (typeof Matter === 'undefined') {
+            console.error('[Train] Matter.js is not loaded. Make sure the physics engine is initialized.');
+            window.RL.setHeadlessMode(false);
+            return null;
+        }
+        
         // Stop the normal game runner to take control of physics
         const { Runner, Render } = Matter;
         const runner = gameContext.runner();
@@ -307,9 +314,10 @@ export function initTraining(context) {
                     state = nextState;
                     stepCount++;
                     
-                    // Yield to event loop periodically
+                    // Yield to event loop periodically to prevent blocking
+                    // Use a small timeout (1ms) for better efficiency
                     if (stepCount % 100 === 0) {
-                        await new Promise(resolve => setTimeout(resolve, 0));
+                        await new Promise(resolve => setTimeout(resolve, 1));
                     }
                 }
                 
