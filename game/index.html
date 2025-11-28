@@ -29,6 +29,27 @@
     
     <!-- Load TensorFlow.js for RL Training -->
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+    <!-- Load TensorFlow.js WebGPU backend for better performance -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu@4.17.0"></script>
+    <script>
+        // Switch to WebGPU backend if available, otherwise fall back to WebGL
+        (async function() {
+            if (typeof tf !== 'undefined') {
+                try {
+                    // Check if WebGPU is supported
+                    if (navigator.gpu) {
+                        await tf.setBackend('webgpu');
+                        await tf.ready();
+                        console.log('TensorFlow.js using WebGPU backend');
+                    } else {
+                        console.log('WebGPU not supported, using default backend:', tf.getBackend());
+                    }
+                } catch (e) {
+                    console.log('Failed to set WebGPU backend, using default:', tf.getBackend(), e);
+                }
+            }
+        })();
+    </script>
 
     <!-- Load font -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
