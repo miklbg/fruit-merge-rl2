@@ -92,27 +92,9 @@ export function createFastSimController(gameContext) {
             throw new Error('RL interface incomplete. Required: resetEpisode, getState, step, isTerminal, getReward, setHeadlessMode, tickCooldown');
         }
         
-        // If already running, stop the current simulation and wait for it to finish
+        // Check if already running
         if (isRunning) {
-            console.log('[FastSim] Simulation already running. Stopping current simulation...');
-            stop();
-            // Wait for the current run to finish with a timeout to prevent indefinite waiting
-            const maxWaitTime = 5000; // 5 seconds max wait
-            const pollInterval = 50; // 50ms polling interval
-            let waitedTime = 0;
-            await new Promise(resolve => {
-                const checkInterval = setInterval(() => {
-                    waitedTime += pollInterval;
-                    if (!isRunning || waitedTime >= maxWaitTime) {
-                        clearInterval(checkInterval);
-                        if (waitedTime >= maxWaitTime && isRunning) {
-                            console.warn('[FastSim] Timeout waiting for previous simulation to stop. Proceeding anyway.');
-                            isRunning = false;
-                        }
-                        resolve();
-                    }
-                }, pollInterval);
-            });
+            throw new Error('FastSim is already running. Call stop() first.');
         }
         
         isRunning = true;
