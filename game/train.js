@@ -211,14 +211,19 @@ export function initTraining(context) {
      * 
      * @param {number} numEpisodes - Number of episodes to train
      * @param {Object} [options={}] - Optional configuration options
-     * @param {number} [options.renderEveryNSteps=500] - Render a frame every N steps for visual debugging. Set to 0 or null to disable.
+     * @param {number} [options.renderEveryNSteps=500] - Render a frame every N steps for visual debugging. Set to 0 to disable.
      * @param {number} [options.epsilon=0.1] - Exploration rate for epsilon-greedy action selection (0-1). Default 0.1 for 10% random exploration.
      * @returns {Promise<Object>} Training results summary
      */
     window.RL.train = async function(numEpisodes, options = {}) {
-        // Extract options with defaults
-        const renderEveryNSteps = options.renderEveryNSteps !== undefined ? options.renderEveryNSteps : 500;
-        const epsilon = options.epsilon !== undefined ? options.epsilon : 0.1;
+        // Extract options with defaults using destructuring
+        const { renderEveryNSteps = 500, epsilon = 0.1 } = options;
+        
+        // Validate and clamp epsilon to [0, 1]
+        const validEpsilon = Math.max(0, Math.min(1, epsilon));
+        
+        // Validate renderEveryNSteps (treat negative values as 0 to disable)
+        const validRenderEveryNSteps = Math.max(0, Math.floor(renderEveryNSteps));
         
         // Validate model is initialized
         if (!model) {
@@ -250,7 +255,7 @@ export function initTraining(context) {
             return null;
         }
         
-        console.log(`[Train] Starting training: ${numEpisodes} episodes, epsilon=${epsilon}, renderEveryNSteps=${renderEveryNSteps}`);
+        console.log(`[Train] Starting training: ${numEpisodes} episodes, epsilon=${validEpsilon}, renderEveryNSteps=${validRenderEveryNSteps}`);
         const startTime = performance.now();
         
         const results = [];
@@ -298,10 +303,10 @@ export function initTraining(context) {
                 // Episode loop
                 while (!window.RL.isTerminal() && stepCount < MAX_STEPS_PER_EPISODE) {
                     // Select action using epsilon-greedy policy
-                    const action = selectAction(state, epsilon);
+                    const action = selectAction(state, validEpsilon);
                     
                     // Log Q-values and optionally render a single frame periodically for debugging
-                    if (renderEveryNSteps > 0 && stepCount % renderEveryNSteps === 0) {
+                    if (validRenderEveryNSteps > 0 && stepCount % validRenderEveryNSteps === 0) {
                         const qValues = getQValues(state);
                         const qArray = qValues.dataSync();
                         console.log(`[Train] Episode ${episode + 1}, Step ${stepCount}: Q-values = [${qArray.map(q => q.toFixed(4)).join(', ')}], action=${action}`);
