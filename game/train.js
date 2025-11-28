@@ -181,9 +181,6 @@ export function initTraining(context) {
     const stateBuffer = new Float32Array(STATE_SIZE);
     const nextStateBuffer = new Float32Array(STATE_SIZE);
     
-    // Pre-allocated buffer for batched prediction input
-    let batchStateTensor = null;
-    
     // Replay buffer instance
     let replayBuffer = null;
     
@@ -301,61 +298,14 @@ export function initTraining(context) {
     }
     
     /**
-     * Train on a minibatch using trainOnBatch for efficiency.
+     * Train on a minibatch using gradient descent.
      * Computes Q-targets and performs a single gradient update.
-     * All tensor operations are wrapped in tf.tidy().
+     * All tensor operations are wrapped in tf.tidy() where possible.
      * 
      * @param {Object} batch - Sampled batch from replay buffer
      * @returns {number} Training loss
      */
     function trainOnBatch(batch) {
-        const { states, actions, rewards, nextStates, dones, actualBatchSize } = batch;
-        
-        return tf.tidy(() => {
-            // Create tensors from batch data
-            const statesTensor = tf.tensor2d(states, [actualBatchSize, STATE_SIZE]);
-            const nextStatesTensor = tf.tensor2d(nextStates, [actualBatchSize, STATE_SIZE]);
-            
-            // Compute Q-values for next states (for computing targets)
-            const nextQValues = model.predict(nextStatesTensor);
-            const maxNextQ = nextQValues.max(1);
-            const maxNextQData = maxNextQ.dataSync();
-            
-            // Compute current Q-values
-            const currentQValues = model.predict(statesTensor);
-            const currentQData = currentQValues.arraySync();
-            
-            // Compute target Q-values
-            // For each sample: target[action] = reward + gamma * max(Q(s', a')) * (1 - done)
-            for (let i = 0; i < actualBatchSize; i++) {
-                const action = actions[i];
-                const reward = rewards[i];
-                const done = dones[i];
-                
-                if (done) {
-                    currentQData[i][action] = reward;
-                } else {
-                    currentQData[i][action] = reward + GAMMA * maxNextQData[i];
-                }
-            }
-            
-            // Create target tensor
-            const targetsTensor = tf.tensor2d(currentQData);
-            
-            // Compute loss and train
-            const loss = tf.losses.meanSquaredError(targetsTensor, model.predict(statesTensor));
-            return loss.dataSync()[0];
-        });
-    }
-    
-    /**
-     * Perform gradient update using tf.variableGrads for more control.
-     * This is an alternative to model.fit() that's more efficient for RL.
-     * 
-     * @param {Object} batch - Sampled batch from replay buffer
-     * @returns {number} Training loss
-     */
-    function trainStep(batch) {
         const { states, actions, rewards, nextStates, dones, actualBatchSize } = batch;
         
         // Compute targets outside of gradient tape
@@ -368,6 +318,8 @@ export function initTraining(context) {
             const currentQValues = model.predict(statesTensor);
             const currentQData = currentQValues.arraySync();
             
+            // Compute target Q-values
+            // For each sample: target[action] = reward + gamma * max(Q(s', a')) * (1 - done)
             for (let i = 0; i < actualBatchSize; i++) {
                 const action = actions[i];
                 const reward = rewards[i];
@@ -383,7 +335,7 @@ export function initTraining(context) {
             return tf.tensor2d(currentQData);
         });
         
-        // Compute gradients and apply
+        // Compute gradients and apply using optimizer
         const statesTensor = tf.tensor2d(states, [actualBatchSize, STATE_SIZE]);
         
         const lossFunction = () => {
@@ -396,7 +348,7 @@ export function initTraining(context) {
         
         const lossValue = loss.dataSync()[0];
         
-        // Clean up
+        // Clean up tensors
         targets.dispose();
         statesTensor.dispose();
         loss.dispose();
