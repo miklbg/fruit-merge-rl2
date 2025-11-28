@@ -65,9 +65,12 @@ export function createFastSimController(gameContext) {
      * Run multiple episodes in headless mode
      * 
      * @param {number} numEpisodes - Number of episodes to run
+     * @param {Object} [options={}] - Optional configuration options
+     * @param {boolean} [options.renderOnGameOver=false] - When true, renders the fruits when game over occurs for each episode
      * @returns {Promise<SimulationResult[]>} Array of results, one per episode
      */
-    async function run(numEpisodes) {
+    async function run(numEpisodes, options = {}) {
+        const { renderOnGameOver = false } = options;
         // Validate inputs
         if (typeof numEpisodes !== 'number' || numEpisodes < 1) {
             throw new Error(`Invalid numEpisodes: ${numEpisodes}. Must be a positive number.`);
@@ -185,6 +188,18 @@ export function createFastSimController(gameContext) {
                     }
                 }
                 
+                // Render the game state when game over occurs if option is enabled
+                if (renderOnGameOver && window.RL.isTerminal()) {
+                    const render = gameContext.render();
+                    if (render) {
+                        // Temporarily enable rendering for a single frame
+                        window.RL.setHeadlessMode(false);
+                        Render.world(render);
+                        window.RL.setHeadlessMode(true);
+                        console.log(`[FastSim] Episode ${episodeIdx}: Rendered fruits at game over state`);
+                    }
+                }
+                
                 // Record episode result
                 const finalScore = gameContext.getScore();
                 const episodeTime = performance.now() - episodeStartTime;
@@ -288,6 +303,8 @@ export function initFastSim(gameContext) {
         /**
          * Run headless simulation for the specified number of episodes
          * @param {number} numEpisodes - Number of episodes to run
+         * @param {Object} [options={}] - Optional configuration options
+         * @param {boolean} [options.renderOnGameOver=false] - When true, renders the fruits when game over occurs for each episode
          * @returns {Promise<SimulationResult[]>} Array of results
          */
         run: controller.run,
@@ -298,7 +315,7 @@ export function initFastSim(gameContext) {
         stop: controller.stop
     };
     
-    console.log('[FastSim] Initialized. Use FastSim.run(numEpisodes) to start simulation.');
+    console.log('[FastSim] Initialized. Use FastSim.run(numEpisodes) or FastSim.run(numEpisodes, { renderOnGameOver: true }) to start simulation.');
     
     return controller;
 }
