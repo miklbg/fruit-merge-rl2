@@ -1455,42 +1455,6 @@
                         }
                     };
                     
-                    /**
-                     * Step the physics simulation by one frame.
-                     * Advances the Matter.js engine by one physics timestep (1000/60 ms).
-                     * Should be called after each action in headless mode to simulate physics.
-                     */
-                    window.RL.stepPhysics = function() {
-                        if (engine) {
-                            const DELTA_TIME = 1000 / 60; // 60 FPS physics timestep
-                            Engine.update(engine, DELTA_TIME);
-                        }
-                    };
-                    
-                    /**
-                     * Get the Matter.js engine instance.
-                     * @returns {Object} Matter.js Engine instance
-                     */
-                    window.RL.getEngine = function() {
-                        return engine;
-                    };
-                    
-                    /**
-                     * Get the Matter.js runner instance.
-                     * @returns {Object} Matter.js Runner instance
-                     */
-                    window.RL.getRunner = function() {
-                        return runner;
-                    };
-                    
-                    /**
-                     * Get the Matter.js render instance.
-                     * @returns {Object} Matter.js Render instance
-                     */
-                    window.RL.getRender = function() {
-                        return render;
-                    };
-                    
                     // --- Initialize FastSim for headless simulation ---
                     // Provide game context accessors that return current instances
                     // (instances may change after game reset/restart)

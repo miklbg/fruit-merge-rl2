@@ -169,8 +169,6 @@ export async function trainOneStep(s, a, r, s2, done) {
  *    - Get state via RL.getState()
  *    - Choose action via predictAction()
  *    - Execute action via RL.step()
- *    - Advance physics via RL.stepPhysics()
- *    - Tick cooldown via RL.tickCooldown()
  *    - Get reward and check if done
  *    - Train using trainOneStep()
  * 3. Log final reward and steps
@@ -187,106 +185,64 @@ export async function trainEpisodes(numEpisodes) {
         throw new Error('Model not initialized. Call initModel() first.');
     }
     
-    // Check required RL methods
-    if (typeof window.RL.setHeadlessMode !== 'function' ||
-        typeof window.RL.stepPhysics !== 'function' ||
-        typeof window.RL.tickCooldown !== 'function' ||
-        typeof window.RL.getRunner !== 'function' ||
-        typeof window.RL.getRender !== 'function') {
-        throw new Error('RL interface incomplete. Required: setHeadlessMode, stepPhysics, tickCooldown, getRunner, getRender');
-    }
-    
     console.log(`[Train] Starting training for ${numEpisodes} episodes`);
     
     const results = [];
     
-    // Enable headless mode to disable rendering and audio
-    window.RL.setHeadlessMode(true);
-    
-    // Stop the normal game runner and render to take control of physics updates
-    const runner = window.RL.getRunner();
-    const render = window.RL.getRender();
-    
-    // Note: Matter.js is expected to be available globally when this code runs
-    // These checks are defensive in case the global isn't available
-    if (typeof Matter !== 'undefined') {
-        if (runner && Matter.Runner) {
-            Matter.Runner.stop(runner);
-        }
-        if (render && Matter.Render) {
-            Matter.Render.stop(render);
-        }
-    }
-    
-    try {
-        for (let ep = 0; ep < numEpisodes; ep++) {
-            // Reset episode
-            window.RL.resetEpisode();
-            
-            let steps = 0;
-            let totalReward = 0;
-            let done = false;
-            
-            // Get initial state
-            let state = window.RL.getState();
-            
-            while (!done) {
-                // Choose action
-                const action = predictAction(state);
-                
-                // Execute action and get reward
-                const reward = window.RL.step(action);
-                
-                // Advance physics simulation
-                window.RL.stepPhysics();
-                
-                // Tick the step-based cooldown counter
-                window.RL.tickCooldown();
-                
-                // Check if terminal
-                done = window.RL.isTerminal();
-                
-                // Get next state
-                const nextState = window.RL.getState();
-                
-                // Train on this transition
-                await trainOneStep(state, action, reward, nextState, done);
-                
-                // Update for next iteration
-                state = nextState;
-                totalReward += reward;
-                steps++;
-                
-                // Yield to event loop periodically
-                if (steps % 50 === 0) {
-                    await new Promise(resolve => setTimeout(resolve, 0));
-                }
-            }
-            
-            const episodeResult = {
-                episode: ep,
-                steps: steps,
-                totalReward: totalReward
-            };
-            
-            results.push(episodeResult);
-            
-            console.log(`[Train] Episode ${ep}: steps=${steps}, reward=${totalReward.toFixed(2)}`);
-        }
-    } finally {
-        // Restore normal mode
-        window.RL.setHeadlessMode(false);
+    for (let ep = 0; ep < numEpisodes; ep++) {
+        // Reset episode
+        window.RL.resetEpisode();
         
-        // Reset the game to leave it in a clean state with rendering restored
-        // RL.reset() calls handleRestart() which calls initGame()
-        // initGame() restarts Render.run() and Runner.run() automatically
-        try {
-            if (typeof window.RL.reset === 'function') {
-                window.RL.reset();
-            }
-        } catch (e) {
-            console.warn('[Train] Failed to reset game after training:', e);
+        // Wait for the game to reinitialize after reset.
+        // In non-headless mode, resetEpisode() calls handleRestart() which reinitializes
+        // the physics engine, renderer, and game state. 100ms allows these async operations
+        // to complete before we start the next episode.
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        let steps = 0;
+        let totalReward = 0;
+        let done = false;
+        
+        // Get initial state
+        let state = window.RL.getState();
+        
+        while (!done) {
+            // Choose action
+            const action = predictAction(state);
+            
+            // Execute action and get reward
+            const reward = window.RL.step(action);
+            
+            // Check if terminal
+            done = window.RL.isTerminal();
+            
+            // Get next state
+            const nextState = window.RL.getState();
+            
+            // Train on this transition
+            await trainOneStep(state, action, reward, nextState, done);
+            
+            // Update for next iteration
+            state = nextState;
+            totalReward += reward;
+            steps++;
+            
+            // Yield to event loop every step to allow physics to advance.
+            // In non-headless mode, the Matter.js runner advances physics via requestAnimationFrame.
+            // Note: This makes training slower but allows the game to render properly.
+            // For faster training, use FastSim.run() in headless mode instead.
+            await new Promise(resolve => setTimeout(resolve, 0));
         }
+        
+        const episodeResult = {
+            episode: ep,
+            steps: steps,
+            totalReward: totalReward
+        };
+        
+        results.push(episodeResult);
+        
+        console.log(`[Train] Episode ${ep}: steps=${steps}, reward=${totalReward.toFixed(2)}`);
     }
     
     console.log('[Train] Training completed');
