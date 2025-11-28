@@ -1199,7 +1199,13 @@
                      * - 2: Move fruit to center (normalized X = 0.5)
                      * - 3: Drop fruit
                      * 
+                     * After performing the action, computes reward as:
+                     *   reward = currentScore - RL.lastScore
+                     * Applies a small negative penalty (-1) if game over.
+                     * Updates RL.lastScore to current score.
+                     * 
                      * @param {number} actionIndex - Action index (0-3)
+                     * @returns {number} Reward value (score delta, with game over penalty if applicable)
                      */
                     window.RL.step = function(actionIndex) {
                         const dx = 0.04; // Small horizontal step size
@@ -1226,12 +1232,34 @@
                                 // Invalid action index - do nothing
                                 break;
                         }
+                        
+                        // Compute reward based on score change
+                        const currentScore = score;
+                        let reward = currentScore - window.RL.lastScore;
+                        
+                        // Ensure reward is a valid number (never NaN)
+                        if (Number.isNaN(reward) || !Number.isFinite(reward)) {
+                            reward = 0;
+                        }
+                        
+                        // Apply small negative penalty on game over
+                        if (isGameOver) {
+                            reward -= 1;
+                        }
+                        
+                        // Update lastScore for next step
+                        window.RL.lastScore = currentScore;
+                        
+                        // Accumulate episode reward
+                        window.RL._episodeReward += reward;
+                        
+                        return reward;
                     };
                     
                     // --- RL Environment Control API ---
-                    // Internal fields for reward tracking
-                    window.RL._episodeReward = 0;
-                    window.RL._lastScore = 0;
+                    // Fields for reward tracking
+                    window.RL._episodeReward = 0;  // Internal accumulator for episode reward
+                    window.RL.lastScore = 0;       // Public property tracking previous frame's score
                     
                     /**
                      * Reset the game to a fresh episode state.
@@ -1242,7 +1270,7 @@
                     window.RL.reset = function() {
                         // Reset internal reward tracking
                         window.RL._episodeReward = 0;
-                        window.RL._lastScore = 0;
+                        window.RL.lastScore = 0;
                         
                         // Use the existing handleRestart function to properly reset the game
                         // This clears all fruits, physics bodies, score, etc.
@@ -1270,16 +1298,23 @@
                     
                     /**
                      * Get the reward based on score change since last call.
-                     * Reward = currentScore - _lastScore
-                     * Updates _lastScore to current score after computing reward.
+                     * Reward = currentScore - lastScore
+                     * Updates lastScore to current score after computing reward.
                      * Accumulates into _episodeReward.
+                     * Always returns a valid number (never NaN).
                      * 
                      * @returns {number} Reward value (score difference since last call)
                      */
                     window.RL.getReward = function() {
                         const currentScore = score;
-                        const reward = currentScore - window.RL._lastScore;
-                        window.RL._lastScore = currentScore;
+                        let reward = currentScore - window.RL.lastScore;
+                        
+                        // Ensure reward is a valid number (never NaN)
+                        if (Number.isNaN(reward) || !Number.isFinite(reward)) {
+                            reward = 0;
+                        }
+                        
+                        window.RL.lastScore = currentScore;
                         window.RL._episodeReward += reward;
                         return reward;
                     };
@@ -1292,7 +1327,7 @@
                     window.RL.resetEpisode = function() {
                         // Reset internal reward tracking
                         window.RL._episodeReward = 0;
-                        window.RL._lastScore = 0;
+                        window.RL.lastScore = 0;
                         
                         if (isHeadlessMode) {
                             // Lightweight reset: clear physics bodies and reset game state
