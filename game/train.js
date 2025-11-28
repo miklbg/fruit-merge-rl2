@@ -107,6 +107,12 @@ class ReplayBuffer {
      * Sample a random minibatch of transitions.
      * Returns typed arrays for direct tensor creation.
      * Uses pre-allocated arrays where possible to minimize allocations.
+     * 
+     * Note: Uses sampling WITH replacement for O(batchSize) complexity.
+     * Sampling without replacement would require O(batchSize^2) or additional
+     * data structures. The impact on training quality is minimal for typical
+     * buffer sizes (10k+) and batch sizes (64).
+     * 
      * @param {number} batchSize - Number of transitions to sample
      * @returns {{states: Float32Array, actions: Uint8Array, rewards: Float32Array, nextStates: Float32Array, dones: Uint8Array, indices: Uint32Array, actualBatchSize: number}}
      */
@@ -120,7 +126,7 @@ class ReplayBuffer {
         const batchNextStates = new Float32Array(actualBatchSize * this.stateSize);
         const batchDones = new Uint8Array(actualBatchSize);
         
-        // Random sampling (with replacement for simplicity and speed)
+        // Random sampling with replacement (O(batchSize) complexity)
         for (let i = 0; i < actualBatchSize; i++) {
             const idx = Math.floor(Math.random() * this._size);
             this._batchIndices[i] = idx;
@@ -339,8 +345,14 @@ export function initTraining(context) {
             return;
         }
         
+        // Get weights from main model
         const mainWeights = model.getWeights();
+        
+        // Set weights on target model
         targetModel.setWeights(mainWeights);
+        
+        // Dispose of weight tensors to prevent memory leak
+        mainWeights.forEach(w => w.dispose());
     }
     
     /**
@@ -611,6 +623,9 @@ export function initTraining(context) {
                 const rawState = window.RL.getState();
                 encodeStateIntoBuffer(rawState, stateBuffer);
                 
+                // Track when buffer has enough samples for training (optimization to avoid repeated size() calls)
+                let canTrain = replayBuffer.size() >= validMinBufferSize;
+                
                 // Episode loop with periodic yields to prevent browser freeze
                 while (!window.RL.isTerminal() && stepCount < MAX_STEPS_PER_EPISODE) {
                     // Select action using epsilon-greedy policy
@@ -637,9 +652,13 @@ export function initTraining(context) {
                     // Store transition in replay buffer
                     replayBuffer.add(stateBuffer, action, reward, nextStateBuffer, done);
                     
+                    // Update canTrain flag if we just crossed the threshold
+                    if (!canTrain && replayBuffer.size() >= validMinBufferSize) {
+                        canTrain = true;
+                    }
+                    
                     // Train on minibatch if enough samples and at training interval
-                    if (replayBuffer.size() >= validMinBufferSize && 
-                        stepCount % validTrainEveryNSteps === 0) {
+                    if (canTrain && stepCount % validTrainEveryNSteps === 0) {
                         const batch = replayBuffer.sampleBatch(validBatchSize);
                         const loss = trainOnBatch(batch, validGamma);
                         totalLoss += loss;
@@ -870,6 +889,9 @@ export function initTraining(context) {
                 const rawState = window.RL.getState();
                 encodeStateIntoBuffer(rawState, stateBuffer);
                 
+                // Track when buffer has enough samples for training (optimization to avoid repeated size() calls)
+                let canTrain = replayBuffer.size() >= validMinBufferSize;
+                
                 while (!window.RL.isTerminal() && stepCount < MAX_STEPS_PER_EPISODE) {
                     const action = selectActionFromBuffer(stateBuffer, currentEpsilon);
                     
@@ -886,9 +908,13 @@ export function initTraining(context) {
                     
                     replayBuffer.add(stateBuffer, action, reward, nextStateBuffer, done);
                     
+                    // Update canTrain flag if we just crossed the threshold
+                    if (!canTrain && replayBuffer.size() >= validMinBufferSize) {
+                        canTrain = true;
+                    }
+                    
                     // Train on minibatch if enough samples and at training interval
-                    if (replayBuffer.size() >= validMinBufferSize && 
-                        stepCount % validTrainEveryNSteps === 0) {
+                    if (canTrain && stepCount % validTrainEveryNSteps === 0) {
                         const batch = replayBuffer.sampleBatch(validBatchSize);
                         const loss = trainOnBatch(batch, validGamma);
                         totalLoss += loss;
