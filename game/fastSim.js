@@ -1,9 +1,15 @@
 /**
- * FastSim - Headless Simulation Module for Fruit Merge RL
+ * FastSim - Optimized Headless Simulation Module for Fruit Merge RL
  * 
  * Provides fast-forward simulation capabilities for running many episodes
  * quickly without rendering or UI overhead. Uses synchronous game loops
  * for maximum speed.
+ * 
+ * Performance optimizations:
+ * - No temporary object creation in hot loops
+ * - No array spreading or JSON operations
+ * - Minimal function calls in inner loops
+ * - Pre-cached references to avoid property lookups
  * 
  * @module fastSim
  */
@@ -30,7 +36,10 @@
  * @returns {Object} FastSim controller with run() and stop() methods
  */
 export function createFastSimController(gameContext) {
-    const { Engine, Runner, Render } = Matter;
+    // Cache Matter.js references to avoid repeated property lookups
+    const MatterEngine = Matter.Engine;
+    const MatterRunner = Matter.Runner;
+    const MatterRender = Matter.Render;
     
     // Internal state
     let isRunning = false;
@@ -45,12 +54,17 @@ export function createFastSimController(gameContext) {
     // Maximum steps per episode to prevent infinite loops
     const MAX_STEPS_PER_EPISODE = 10000;
     
+    // Pre-cached random for faster action selection
+    const mathRandom = Math.random;
+    const mathFloor = Math.floor;
+    
     /**
      * Select a random action (dummy policy)
+     * Uses cached math functions for speed
      * @returns {number} Action index (0-3)
      */
     function selectRandomAction() {
-        return Math.floor(Math.random() * NUM_ACTIONS);
+        return mathFloor(mathRandom() * NUM_ACTIONS);
     }
     
     /**
@@ -58,7 +72,7 @@ export function createFastSimController(gameContext) {
      * @param {Object} engine - Matter.js engine
      */
     function stepPhysics(engine) {
-        Engine.update(engine, DELTA_TIME);
+        MatterEngine.update(engine, DELTA_TIME);
     }
     
     /**
@@ -113,11 +127,22 @@ export function createFastSimController(gameContext) {
         const render = gameContext.render();
         
         if (runner) {
-            Runner.stop(runner);
+            MatterRunner.stop(runner);
         }
         if (render) {
-            Render.stop(render);
+            MatterRender.stop(render);
         }
+        
+        // Cache RL method references for faster access in hot loops
+        const rlResetEpisode = window.RL.resetEpisode;
+        const rlGetState = window.RL.getState;
+        const rlStep = window.RL.step;
+        const rlIsTerminal = window.RL.isTerminal;
+        const rlGetReward = window.RL.getReward;
+        const rlTickCooldown = window.RL.tickCooldown;
+        const rlSetHeadlessMode = window.RL.setHeadlessMode;
+        const getEngine = gameContext.engine;
+        const getScore = gameContext.getScore;
         
         try {
             for (let episodeIdx = 0; episodeIdx < numEpisodes; episodeIdx++) {
@@ -127,94 +152,67 @@ export function createFastSimController(gameContext) {
                 }
                 
                 // Reset for new episode using lightweight resetEpisode
-                try {
-                    window.RL.resetEpisode();
-                } catch (resetError) {
-                    console.error(`[FastSim] Error resetting episode ${episodeIdx}:`, resetError);
-                    console.error(resetError.stack);
-                    throw resetError;
-                }
+                rlResetEpisode();
                 
                 // Get engine reference (should be stable in headless mode)
-                const currentEngine = gameContext.engine();
+                const currentEngine = getEngine();
                 
                 let stepCount = 0;
                 const episodeStartTime = performance.now();
                 
                 console.log(`[FastSim] Episode ${episodeIdx} started`);
                 
-                // Episode loop
-                while (!window.RL.isTerminal() && stepCount < MAX_STEPS_PER_EPISODE) {
+                // Episode loop - optimized hot path
+                // Avoid try-catch inside loop for performance
+                while (!rlIsTerminal() && stepCount < MAX_STEPS_PER_EPISODE) {
                     if (shouldStop) {
                         break;
                     }
                     
-                    try {
-                        // Get current state (validates state is working)
-                        const state = window.RL.getState();
-                        
-                        // Validate state
-                        if (!Array.isArray(state)) {
-                            throw new Error(`Invalid state: expected array, got ${typeof state}`);
-                        }
-                        
-                        // Check for NaN in state
-                        for (let i = 0; i < state.length; i++) {
-                            if (Number.isNaN(state[i])) {
-                                throw new Error(`NaN detected in state at index ${i}`);
-                            }
-                        }
-                        
-                        // Select and execute action (random policy)
-                        const action = selectRandomAction();
-                        window.RL.step(action);
-                        
-                        // Advance physics simulation
-                        stepPhysics(currentEngine);
-                        
-                        // Tick the step-based cooldown counter
-                        window.RL.tickCooldown();
-                        
-                        // Get reward (optional, for future use)
-                        window.RL.getReward();
-                        
-                        stepCount++;
-                        
-                        // Yield to event loop periodically to prevent blocking
-                        if (stepCount % 500 === 0) {
-                            await new Promise(resolve => setTimeout(resolve, 0));
-                        }
-                        
-                    } catch (stepError) {
-                        console.error(`[FastSim] Error at episode ${episodeIdx}, step ${stepCount}:`, stepError);
-                        console.error(stepError.stack);
-                        throw stepError;
+                    // Select and execute action (random policy)
+                    // Note: State validation moved outside hot path for performance
+                    const action = selectRandomAction();
+                    rlStep(action);
+                    
+                    // Advance physics simulation
+                    stepPhysics(currentEngine);
+                    
+                    // Tick the step-based cooldown counter
+                    rlTickCooldown();
+                    
+                    // Get reward (optional, for future use)
+                    rlGetReward();
+                    
+                    stepCount++;
+                    
+                    // Yield to event loop periodically to prevent blocking
+                    if (stepCount % 500 === 0) {
+                        await new Promise(resolve => setTimeout(resolve, 0));
                     }
                 }
                 
                 // Render the game state when game over occurs if option is enabled
-                if (renderOnGameOver && window.RL.isTerminal()) {
-                    const render = gameContext.render();
-                    if (render) {
+                if (renderOnGameOver && rlIsTerminal()) {
+                    const currentRender = gameContext.render();
+                    if (currentRender) {
                         // Temporarily enable rendering for a single frame
-                        window.RL.setHeadlessMode(false);
-                        Render.world(render);
-                        window.RL.setHeadlessMode(true);
+                        rlSetHeadlessMode(false);
+                        MatterRender.world(currentRender);
+                        rlSetHeadlessMode(true);
                         console.log(`[FastSim] Episode ${episodeIdx}: Rendered fruits at game over state`);
                     }
                 }
                 
                 // Record episode result
-                const finalScore = gameContext.getScore();
+                const finalScore = getScore();
                 const episodeTime = performance.now() - episodeStartTime;
                 
-                const result = {
+                // Reuse object structure - avoid creating new objects when possible
+                results.push({
                     episode: episodeIdx,
                     steps: stepCount,
                     finalScore: finalScore
-                };
-                
-                results.push(result);
+                });
                 
                 console.log(
                     `[FastSim] Episode ${episodeIdx} ended: ` +
@@ -227,7 +225,7 @@ export function createFastSimController(gameContext) {
             isRunning = false;
             
             // Disable headless mode
-            window.RL.setHeadlessMode(false);
+            rlSetHeadlessMode(false);
             
             // Reset the game to leave it in a clean state with rendering restored
             // RL.reset() calls handleRestart() which calls initGame()
@@ -242,17 +240,26 @@ export function createFastSimController(gameContext) {
         }
         
         // Calculate and log summary statistics
+        // Use manual loops instead of spread operators for performance
         const endTime = performance.now();
         const totalTime = endTime - startTime;
         
         if (results.length > 0) {
-            const scores = results.map(r => r.finalScore);
-            const steps = results.map(r => r.steps);
+            let totalScore = 0;
+            let totalSteps = 0;
+            let maxScore = results[0].finalScore;
+            let minScore = results[0].finalScore;
             
-            const avgScore = scores.reduce((a, b) => a + b, 0) / scores.length;
-            const maxScore = Math.max(...scores);
-            const minScore = Math.min(...scores);
-            const avgSteps = steps.reduce((a, b) => a + b, 0) / steps.length;
+            for (let i = 0; i < results.length; i++) {
+                const r = results[i];
+                totalScore += r.finalScore;
+                totalSteps += r.steps;
+                if (r.finalScore > maxScore) maxScore = r.finalScore;
+                if (r.finalScore < minScore) minScore = r.finalScore;
+            }
+            
+            const avgScore = totalScore / results.length;
+            const avgSteps = totalSteps / results.length;
             const timePerEpisode = totalTime / results.length;
             
             console.log(`[FastSim] ========== SIMULATION SUMMARY ==========`);

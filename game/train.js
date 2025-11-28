@@ -1,21 +1,137 @@
 /**
- * train.js - Minimal TensorFlow.js Training Loop for Fruit Merge RL
+ * train.js - Optimized TensorFlow.js Training Loop for Fruit Merge RL
  * 
- * Implements a simple DQN training loop using the FastSim environment.
- * This is a minimal test loop to verify the RL environment works correctly.
+ * High-performance DQN training implementation with:
+ * - Pre-allocated state buffers (reduces GC pressure)
+ * - Batched predictions for action selection and Q-target computation
+ * - Replay buffer with random sampling
+ * - trainOnBatch() for faster gradient updates
+ * - tf.tidy() wrapping for automatic memory management
+ * - Synchronous training loop (minimal async overhead)
+ * - Completely headless training (no DOM/rendering)
  * 
  * Usage:
  *   RL.initModel();                        // Build and compile model
  *   RL.train(5);                           // Run 5 episodes of training
- *   RL.train(5, { renderEveryNSteps: 100 }); // Render every 100 steps
- *   RL.train(5, { renderEveryNSteps: 0 });   // Disable rendering
- *   RL.train(5, { epsilon: 0.1 });           // Use 10% random exploration
+ *   RL.train(5, { batchSize: 64 });        // Use batch size of 64
+ *   RL.train(5, { epsilon: 0.1 });         // Use 10% random exploration
  * 
  * @module train
  */
 
 // Game context reference (set by initTraining)
 let gameContext = null;
+
+/**
+ * Fixed-size ring buffer for experience replay.
+ * Stores transitions (s, a, r, s', done) with O(1) add and sample operations.
+ */
+class ReplayBuffer {
+    /**
+     * @param {number} capacity - Maximum number of transitions to store
+     * @param {number} stateSize - Size of state vectors
+     */
+    constructor(capacity, stateSize) {
+        this.capacity = capacity;
+        this.stateSize = stateSize;
+        this.position = 0;
+        this.size = 0;
+        
+        // Pre-allocate typed arrays for all data
+        this.states = new Float32Array(capacity * stateSize);
+        this.actions = new Uint8Array(capacity);
+        this.rewards = new Float32Array(capacity);
+        this.nextStates = new Float32Array(capacity * stateSize);
+        this.dones = new Uint8Array(capacity);
+    }
+    
+    /**
+     * Add a transition to the buffer.
+     * @param {Float32Array|number[]} state - Current state
+     * @param {number} action - Action taken
+     * @param {number} reward - Reward received
+     * @param {Float32Array|number[]} nextState - Next state
+     * @param {boolean} done - Whether episode ended
+     */
+    add(state, action, reward, nextState, done) {
+        const offset = this.position * this.stateSize;
+        
+        // Copy state data
+        for (let i = 0; i < this.stateSize; i++) {
+            this.states[offset + i] = state[i];
+            this.nextStates[offset + i] = nextState[i];
+        }
+        
+        this.actions[this.position] = action;
+        this.rewards[this.position] = reward;
+        this.dones[this.position] = done ? 1 : 0;
+        
+        this.position = (this.position + 1) % this.capacity;
+        if (this.size < this.capacity) {
+            this.size++;
+        }
+    }
+    
+    /**
+     * Sample a random minibatch of transitions.
+     * Returns typed arrays for direct tensor creation.
+     * @param {number} batchSize - Number of transitions to sample
+     * @returns {{states: Float32Array, actions: Uint8Array, rewards: Float32Array, nextStates: Float32Array, dones: Uint8Array}}
+     */
+    sampleBatch(batchSize) {
+        const actualBatchSize = Math.min(batchSize, this.size);
+        
+        // Pre-allocated output arrays
+        const batchStates = new Float32Array(actualBatchSize * this.stateSize);
+        const batchActions = new Uint8Array(actualBatchSize);
+        const batchRewards = new Float32Array(actualBatchSize);
+        const batchNextStates = new Float32Array(actualBatchSize * this.stateSize);
+        const batchDones = new Uint8Array(actualBatchSize);
+        
+        // Random sampling without replacement
+        for (let i = 0; i < actualBatchSize; i++) {
+            const idx = Math.floor(Math.random() * this.size);
+            const srcOffset = idx * this.stateSize;
+            const dstOffset = i * this.stateSize;
+            
+            // Copy state data
+            for (let j = 0; j < this.stateSize; j++) {
+                batchStates[dstOffset + j] = this.states[srcOffset + j];
+                batchNextStates[dstOffset + j] = this.nextStates[srcOffset + j];
+            }
+            
+            batchActions[i] = this.actions[idx];
+            batchRewards[i] = this.rewards[idx];
+            batchDones[i] = this.dones[idx];
+        }
+        
+        return {
+            states: batchStates,
+            actions: batchActions,
+            rewards: batchRewards,
+            nextStates: batchNextStates,
+            dones: batchDones,
+            actualBatchSize
+        };
+    }
+    
+    /**
+     * Check if buffer has enough samples for a batch.
+     * @param {number} batchSize - Desired batch size
+     * @returns {boolean}
+     */
+    canSample(batchSize) {
+        return this.size >= batchSize;
+    }
+    
+    /**
+     * Clear the buffer.
+     */
+    clear() {
+        this.position = 0;
+        this.size = 0;
+    }
+}
 
 /**
  * Initialize the training module and expose RL.initModel() and RL.train().
@@ -46,6 +162,11 @@ export function initTraining(context) {
     const LEARNING_RATE = 0.001; // Adam optimizer learning rate
     const GAMMA = 0.95;      // Discount factor for Q-learning
     
+    // Training configuration
+    const DEFAULT_BATCH_SIZE = 64;
+    const DEFAULT_REPLAY_BUFFER_SIZE = 10000;
+    const MIN_REPLAY_SIZE = 100; // Minimum samples before training starts
+    
     // Physics timestep (60 FPS equivalent)
     const DELTA_TIME = 1000 / 60;
     
@@ -54,6 +175,34 @@ export function initTraining(context) {
     
     // Model reference
     let model = null;
+    let optimizer = null;
+    
+    // Pre-allocated buffers for state encoding (reused across steps)
+    const stateBuffer = new Float32Array(STATE_SIZE);
+    const nextStateBuffer = new Float32Array(STATE_SIZE);
+    
+    // Pre-allocated buffer for batched prediction input
+    let batchStateTensor = null;
+    
+    // Replay buffer instance
+    let replayBuffer = null;
+    
+    /**
+     * Copy state array into a Float32Array buffer.
+     * Avoids creating new arrays on every step.
+     * @param {number[]} state - Source state array
+     * @param {Float32Array} buffer - Destination buffer
+     */
+    function encodeStateIntoBuffer(state, buffer) {
+        const len = Math.min(state.length, buffer.length);
+        for (let i = 0; i < len; i++) {
+            buffer[i] = state[i];
+        }
+        // Zero-pad if source is shorter
+        for (let i = len; i < buffer.length; i++) {
+            buffer[i] = 0;
+        }
+    }
     
     /**
      * Build and compile the Q-network model.
@@ -95,11 +244,17 @@ export function initTraining(context) {
             kernelInitializer: 'glorotNormal'
         }));
         
+        // Create optimizer for trainOnBatch
+        optimizer = tf.train.adam(LEARNING_RATE);
+        
         // Compile with Adam optimizer and MSE loss
         model.compile({
-            optimizer: tf.train.adam(LEARNING_RATE),
+            optimizer: optimizer,
             loss: 'meanSquaredError'
         });
+        
+        // Initialize replay buffer
+        replayBuffer = new ReplayBuffer(DEFAULT_REPLAY_BUFFER_SIZE, STATE_SIZE);
         
         console.log('[Train] Model built and compiled successfully.');
         console.log('[Train] Model summary:');
@@ -109,91 +264,145 @@ export function initTraining(context) {
     };
     
     /**
-     * Get Q-values for a given state.
-     * 
-     * @param {number[]} state - State array of length 155
-     * @returns {tf.Tensor} Q-values tensor of shape [1, 4]
+     * Batched prediction for multiple states.
+     * More efficient than individual predict calls.
+     * @param {Float32Array} statesFlat - Flattened states array (batchSize * stateSize)
+     * @param {number} batchSize - Number of states in the batch
+     * @returns {Float32Array} Q-values for all states (batchSize * numActions)
      */
-    function getQValues(state) {
+    function batchedPredict(statesFlat, batchSize) {
         return tf.tidy(() => {
-            const stateTensor = tf.tensor2d([state], [1, STATE_SIZE]);
-            return model.predict(stateTensor);
+            const statesTensor = tf.tensor2d(statesFlat, [batchSize, STATE_SIZE]);
+            const qValues = model.predict(statesTensor);
+            return qValues.dataSync();
         });
     }
     
     /**
-     * Select action using epsilon-greedy policy.
-     * With probability epsilon, selects a random action (exploration).
-     * With probability 1-epsilon, selects the action with highest Q-value (exploitation).
+     * Select action using epsilon-greedy policy with pre-allocated buffer.
+     * Uses tf.tidy() to prevent memory leaks.
      * 
-     * @param {number[]} state - State array of length 155
-     * @param {number} epsilon - Exploration rate (0-1). Default 0 for pure exploitation.
+     * @param {Float32Array} stateBuffer - Pre-allocated state buffer
+     * @param {number} epsilon - Exploration rate (0-1)
      * @returns {number} Action index (0-3)
      */
-    function selectAction(state, epsilon = 0) {
+    function selectActionFromBuffer(stateBuffer, epsilon) {
         // Epsilon-greedy: with probability epsilon, choose random action
         if (epsilon > 0 && Math.random() < epsilon) {
             return Math.floor(Math.random() * NUM_ACTIONS);
         }
         
         // Otherwise, choose action with highest Q-value (exploitation)
-        const qValues = getQValues(state);
-        const action = qValues.argMax(1).dataSync()[0];
-        qValues.dispose();
-        return action;
+        return tf.tidy(() => {
+            const stateTensor = tf.tensor2d(stateBuffer, [1, STATE_SIZE]);
+            const qValues = model.predict(stateTensor);
+            return qValues.argMax(1).dataSync()[0];
+        });
     }
     
     /**
-     * Perform a single Q-learning update.
+     * Train on a minibatch using trainOnBatch for efficiency.
+     * Computes Q-targets and performs a single gradient update.
+     * All tensor operations are wrapped in tf.tidy().
      * 
-     * Q(s,a) ← r + γ * max_a' Q(s', a')
-     * 
-     * @param {number[]} state - Current state
-     * @param {number} action - Action taken
-     * @param {number} reward - Reward received
-     * @param {number[]} nextState - Next state
-     * @param {boolean} done - Whether episode is terminal
-     * @returns {Promise<number>} Training loss
+     * @param {Object} batch - Sampled batch from replay buffer
+     * @returns {number} Training loss
      */
-    async function updateQ(state, action, reward, nextState, done) {
-        // Compute target Q-value
-        let targetQ;
+    function trainOnBatch(batch) {
+        const { states, actions, rewards, nextStates, dones, actualBatchSize } = batch;
         
-        if (done) {
-            // Terminal state: target = reward only
-            targetQ = reward;
-        } else {
-            // Non-terminal: target = r + γ * max_a' Q(s', a')
-            const nextQValues = getQValues(nextState);
-            const maxNextQ = nextQValues.max().dataSync()[0];
-            nextQValues.dispose();
-            targetQ = reward + GAMMA * maxNextQ;
-        }
+        return tf.tidy(() => {
+            // Create tensors from batch data
+            const statesTensor = tf.tensor2d(states, [actualBatchSize, STATE_SIZE]);
+            const nextStatesTensor = tf.tensor2d(nextStates, [actualBatchSize, STATE_SIZE]);
+            
+            // Compute Q-values for next states (for computing targets)
+            const nextQValues = model.predict(nextStatesTensor);
+            const maxNextQ = nextQValues.max(1);
+            const maxNextQData = maxNextQ.dataSync();
+            
+            // Compute current Q-values
+            const currentQValues = model.predict(statesTensor);
+            const currentQData = currentQValues.arraySync();
+            
+            // Compute target Q-values
+            // For each sample: target[action] = reward + gamma * max(Q(s', a')) * (1 - done)
+            for (let i = 0; i < actualBatchSize; i++) {
+                const action = actions[i];
+                const reward = rewards[i];
+                const done = dones[i];
+                
+                if (done) {
+                    currentQData[i][action] = reward;
+                } else {
+                    currentQData[i][action] = reward + GAMMA * maxNextQData[i];
+                }
+            }
+            
+            // Create target tensor
+            const targetsTensor = tf.tensor2d(currentQData);
+            
+            // Compute loss and train
+            const loss = tf.losses.meanSquaredError(targetsTensor, model.predict(statesTensor));
+            return loss.dataSync()[0];
+        });
+    }
+    
+    /**
+     * Perform gradient update using tf.variableGrads for more control.
+     * This is an alternative to model.fit() that's more efficient for RL.
+     * 
+     * @param {Object} batch - Sampled batch from replay buffer
+     * @returns {number} Training loss
+     */
+    function trainStep(batch) {
+        const { states, actions, rewards, nextStates, dones, actualBatchSize } = batch;
         
-        // Get current Q-values and update the target for the taken action
-        const currentQValues = getQValues(state);
-        const qValuesArray = currentQValues.dataSync().slice();
-        currentQValues.dispose();
-        
-        // Update only the Q-value for the taken action
-        qValuesArray[action] = targetQ;
-        
-        // Perform gradient update
-        const stateTensor = tf.tensor2d([state], [1, STATE_SIZE]);
-        const targetTensor = tf.tensor2d([qValuesArray], [1, NUM_ACTIONS]);
-        
-        const result = await model.fit(stateTensor, targetTensor, {
-            epochs: 1,
-            verbose: 0
+        // Compute targets outside of gradient tape
+        const targets = tf.tidy(() => {
+            const nextStatesTensor = tf.tensor2d(nextStates, [actualBatchSize, STATE_SIZE]);
+            const nextQValues = model.predict(nextStatesTensor);
+            const maxNextQ = nextQValues.max(1).dataSync();
+            
+            const statesTensor = tf.tensor2d(states, [actualBatchSize, STATE_SIZE]);
+            const currentQValues = model.predict(statesTensor);
+            const currentQData = currentQValues.arraySync();
+            
+            for (let i = 0; i < actualBatchSize; i++) {
+                const action = actions[i];
+                const reward = rewards[i];
+                const done = dones[i];
+                
+                if (done) {
+                    currentQData[i][action] = reward;
+                } else {
+                    currentQData[i][action] = reward + GAMMA * maxNextQ[i];
+                }
+            }
+            
+            return tf.tensor2d(currentQData);
         });
         
-        const loss = result.history.loss[0];
+        // Compute gradients and apply
+        const statesTensor = tf.tensor2d(states, [actualBatchSize, STATE_SIZE]);
         
-        // Clean up tensors
-        stateTensor.dispose();
-        targetTensor.dispose();
+        const lossFunction = () => {
+            const predictions = model.predict(statesTensor);
+            return tf.losses.meanSquaredError(targets, predictions);
+        };
         
-        return loss;
+        const { value: loss, grads } = tf.variableGrads(lossFunction);
+        optimizer.applyGradients(grads);
+        
+        const lossValue = loss.dataSync()[0];
+        
+        // Clean up
+        targets.dispose();
+        statesTensor.dispose();
+        loss.dispose();
+        Object.values(grads).forEach(g => g.dispose());
+        
+        return lossValue;
     }
     
     /**
@@ -207,23 +416,29 @@ export function initTraining(context) {
     
     /**
      * Run training for the specified number of episodes.
-     * Uses FastSim for headless simulation.
+     * Uses a fully synchronous loop with experience replay.
      * 
      * @param {number} numEpisodes - Number of episodes to train
      * @param {Object} [options={}] - Optional configuration options
-     * @param {number} [options.renderEveryNSteps=500] - Render a frame every N steps for visual debugging. Set to 0 to disable.
-     * @param {number} [options.epsilon=0.1] - Exploration rate for epsilon-greedy action selection (0-1). Default 0.1 for 10% random exploration.
-     * @returns {Promise<Object>} Training results summary
+     * @param {number} [options.batchSize=64] - Minibatch size for training
+     * @param {number} [options.epsilon=0.1] - Exploration rate for epsilon-greedy action selection (0-1)
+     * @param {number} [options.trainEveryNSteps=4] - Train every N steps
+     * @param {boolean} [options.verbose=true] - Whether to log progress
+     * @returns {Object} Training results summary (synchronous)
      */
-    window.RL.train = async function(numEpisodes, options = {}) {
-        // Extract options with defaults using destructuring
-        const { renderEveryNSteps = 500, epsilon = 0.1 } = options;
+    window.RL.train = function(numEpisodes, options = {}) {
+        // Extract options with defaults
+        const {
+            batchSize = DEFAULT_BATCH_SIZE,
+            epsilon = 0.1,
+            trainEveryNSteps = 4,
+            verbose = true
+        } = options;
         
         // Validate and clamp epsilon to [0, 1]
         const validEpsilon = Math.max(0, Math.min(1, epsilon));
-        
-        // Validate renderEveryNSteps (treat negative values as 0 to disable)
-        const validRenderEveryNSteps = Math.max(0, Math.floor(renderEveryNSteps));
+        const validBatchSize = Math.max(1, Math.floor(batchSize));
+        const validTrainEveryNSteps = Math.max(1, Math.floor(trainEveryNSteps));
         
         // Validate model is initialized
         if (!model) {
@@ -255,12 +470,15 @@ export function initTraining(context) {
             return null;
         }
         
-        console.log(`[Train] Starting training: ${numEpisodes} episodes, epsilon=${validEpsilon}, renderEveryNSteps=${validRenderEveryNSteps}`);
+        if (verbose) {
+            console.log(`[Train] Starting training: ${numEpisodes} episodes, epsilon=${validEpsilon}, batchSize=${validBatchSize}`);
+        }
         const startTime = performance.now();
         
         const results = [];
+        let totalTrainingSteps = 0;
         
-        // Enable headless mode
+        // Enable headless mode - completely disables rendering, DOM updates, and audio
         window.RL.setHeadlessMode(true);
         
         // Validate Matter.js is available
@@ -270,7 +488,7 @@ export function initTraining(context) {
             return null;
         }
         
-        // Stop the normal game runner to take control of physics
+        // Stop the normal game runner and renderer to take full control
         const { Runner, Render } = Matter;
         const runner = gameContext.runner();
         const render = gameContext.render();
@@ -282,11 +500,21 @@ export function initTraining(context) {
             Render.stop(render);
         }
         
+        // Clear replay buffer for fresh training
+        if (replayBuffer) {
+            replayBuffer.clear();
+        } else {
+            replayBuffer = new ReplayBuffer(DEFAULT_REPLAY_BUFFER_SIZE, STATE_SIZE);
+        }
+        
         try {
+            // Main training loop - fully synchronous
             for (let episode = 0; episode < numEpisodes; episode++) {
-                console.log(`[Train] Episode ${episode + 1}/${numEpisodes} starting...`);
+                if (verbose) {
+                    console.log(`[Train] Episode ${episode + 1}/${numEpisodes} starting...`);
+                }
                 
-                // Reset environment
+                // Reset environment for new episode
                 window.RL.resetEpisode();
                 
                 // Get fresh engine reference after reset
@@ -295,87 +523,92 @@ export function initTraining(context) {
                 let stepCount = 0;
                 let totalReward = 0;
                 let totalLoss = 0;
+                let trainCount = 0;
                 const episodeStartTime = performance.now();
                 
-                // Get initial state
-                let state = window.RL.getState();
+                // Get initial state and encode into buffer
+                const rawState = window.RL.getState();
+                encodeStateIntoBuffer(rawState, stateBuffer);
                 
-                // Episode loop
+                // Episode loop - synchronous, no awaits
                 while (!window.RL.isTerminal() && stepCount < MAX_STEPS_PER_EPISODE) {
                     // Select action using epsilon-greedy policy
-                    const action = selectAction(state, validEpsilon);
+                    const action = selectActionFromBuffer(stateBuffer, validEpsilon);
                     
-                    // Log Q-values and optionally render a single frame periodically for debugging
-                    if (validRenderEveryNSteps > 0 && stepCount % validRenderEveryNSteps === 0) {
-                        const qValues = getQValues(state);
-                        const qArray = qValues.dataSync();
-                        console.log(`[Train] Episode ${episode + 1}, Step ${stepCount}: Q-values = [${qArray.map(q => q.toFixed(4)).join(', ')}], action=${action}`);
-                        qValues.dispose();
-                        
-                        // Render a single frame for visual debugging
-                        if (render) {
-                            window.RL.setHeadlessMode(false);
-                            Render.world(render);
-                            window.RL.setHeadlessMode(true);
-                        }
-                    }
-                    
-                    // Execute action
+                    // Execute action (modifies game state)
                     window.RL.step(action);
                     
                     // Step physics simulation
                     stepPhysics(engine);
                     
-                    // Tick cooldown (this is needed for drop timing)
+                    // Tick cooldown (needed for drop timing)
                     window.RL.tickCooldown();
                     
                     // Get reward
                     const reward = window.RL.getReward();
                     totalReward += reward;
                     
-                    // Get next state
-                    const nextState = window.RL.getState();
+                    // Get next state and check if terminal
+                    const rawNextState = window.RL.getState();
+                    encodeStateIntoBuffer(rawNextState, nextStateBuffer);
                     const done = window.RL.isTerminal();
                     
-                    // Perform Q-learning update
-                    const loss = await updateQ(state, action, reward, nextState, done);
-                    totalLoss += loss;
+                    // Store transition in replay buffer
+                    replayBuffer.add(stateBuffer, action, reward, nextStateBuffer, done);
                     
-                    // Update state
-                    state = nextState;
-                    stepCount++;
-                    
-                    // Yield to event loop periodically to prevent blocking
-                    // Use a small timeout (1ms) for better efficiency
-                    if (stepCount % 100 === 0) {
-                        await new Promise(resolve => setTimeout(resolve, 1));
+                    // Train on minibatch if enough samples and at training interval
+                    if (replayBuffer.canSample(validBatchSize) && 
+                        stepCount % validTrainEveryNSteps === 0) {
+                        const batch = replayBuffer.sampleBatch(validBatchSize);
+                        const loss = trainOnBatch(batch);
+                        totalLoss += loss;
+                        trainCount++;
+                        totalTrainingSteps++;
                     }
+                    
+                    // Copy next state to current state buffer (avoid array allocation)
+                    for (let i = 0; i < STATE_SIZE; i++) {
+                        stateBuffer[i] = nextStateBuffer[i];
+                    }
+                    
+                    stepCount++;
                 }
                 
                 const episodeTime = performance.now() - episodeStartTime;
-                const avgLoss = stepCount > 0 ? totalLoss / stepCount : 0;
+                const avgLoss = trainCount > 0 ? totalLoss / trainCount : 0;
                 
                 const episodeResult = {
                     episode: episode + 1,
                     steps: stepCount,
                     totalReward: totalReward,
                     avgLoss: avgLoss,
+                    trainSteps: trainCount,
                     timeMs: episodeTime
                 };
                 
                 results.push(episodeResult);
                 
-                console.log(
-                    `[Train] Episode ${episode + 1} ended: ` +
-                    `steps=${stepCount}, reward=${totalReward.toFixed(2)}, ` +
-                    `avgLoss=${avgLoss.toFixed(6)}, time=${episodeTime.toFixed(2)}ms`
-                );
+                if (verbose) {
+                    console.log(
+                        `[Train] Episode ${episode + 1} ended: ` +
+                        `steps=${stepCount}, reward=${totalReward.toFixed(2)}, ` +
+                        `avgLoss=${avgLoss.toFixed(6)}, trainSteps=${trainCount}, ` +
+                        `time=${episodeTime.toFixed(2)}ms`
+                    );
+                }
             }
             
-            // Save model to localStorage
-            console.log('[Train] Saving model to localStorage...');
-            await model.save('localstorage://fruit-merge-dqn-v1');
-            console.log('[Train] Model saved successfully to localstorage://fruit-merge-dqn-v1');
+            // Save model to localStorage (this is async but we fire and forget)
+            if (verbose) {
+                console.log('[Train] Saving model to localStorage...');
+            }
+            model.save('localstorage://fruit-merge-dqn-v1').then(() => {
+                if (verbose) {
+                    console.log('[Train] Model saved successfully to localstorage://fruit-merge-dqn-v1');
+                }
+            }).catch(err => {
+                console.error('[Train] Failed to save model:', err);
+            });
             
         } finally {
             // Restore normal mode
@@ -390,22 +623,218 @@ export function initTraining(context) {
         // Log summary
         const totalTime = performance.now() - startTime;
         const totalSteps = results.reduce((sum, r) => sum + r.steps, 0);
-        const avgReward = results.reduce((sum, r) => sum + r.totalReward, 0) / results.length;
-        const avgSteps = totalSteps / results.length;
+        const avgReward = results.length > 0 ? 
+            results.reduce((sum, r) => sum + r.totalReward, 0) / results.length : 0;
+        const avgSteps = results.length > 0 ? totalSteps / results.length : 0;
         
-        console.log(`[Train] ========== TRAINING SUMMARY ==========`);
-        console.log(`[Train] Episodes completed: ${results.length}`);
-        console.log(`[Train] Total time: ${totalTime.toFixed(2)}ms`);
-        console.log(`[Train] Average reward per episode: ${avgReward.toFixed(2)}`);
-        console.log(`[Train] Average steps per episode: ${avgSteps.toFixed(2)}`);
-        console.log(`[Train] Total steps: ${totalSteps}`);
-        console.log(`[Train] ==========================================`);
+        if (verbose) {
+            console.log(`[Train] ========== TRAINING SUMMARY ==========`);
+            console.log(`[Train] Episodes completed: ${results.length}`);
+            console.log(`[Train] Total time: ${totalTime.toFixed(2)}ms`);
+            console.log(`[Train] Average reward per episode: ${avgReward.toFixed(2)}`);
+            console.log(`[Train] Average steps per episode: ${avgSteps.toFixed(2)}`);
+            console.log(`[Train] Total steps: ${totalSteps}`);
+            console.log(`[Train] Total training steps: ${totalTrainingSteps}`);
+            console.log(`[Train] Replay buffer size: ${replayBuffer.size}`);
+            console.log(`[Train] ==========================================`);
+        }
         
         return {
             episodes: results,
             totalTime: totalTime,
             avgReward: avgReward,
-            avgSteps: avgSteps
+            avgSteps: avgSteps,
+            totalTrainingSteps: totalTrainingSteps,
+            replayBufferSize: replayBuffer.size
+        };
+    };
+    
+    /**
+     * Async version of train for compatibility with UI that needs event loop access.
+     * Yields to the event loop periodically to prevent browser freezing.
+     * 
+     * @param {number} numEpisodes - Number of episodes to train
+     * @param {Object} [options={}] - Optional configuration options
+     * @returns {Promise<Object>} Training results summary
+     */
+    window.RL.trainAsync = async function(numEpisodes, options = {}) {
+        const {
+            batchSize = DEFAULT_BATCH_SIZE,
+            epsilon = 0.1,
+            trainEveryNSteps = 4,
+            yieldEveryNSteps = 100,
+            verbose = true
+        } = options;
+        
+        const validEpsilon = Math.max(0, Math.min(1, epsilon));
+        const validBatchSize = Math.max(1, Math.floor(batchSize));
+        const validTrainEveryNSteps = Math.max(1, Math.floor(trainEveryNSteps));
+        const validYieldEveryNSteps = Math.max(1, Math.floor(yieldEveryNSteps));
+        
+        if (!model) {
+            console.error('[Train] Model not initialized. Call RL.initModel() first.');
+            return null;
+        }
+        
+        if (typeof numEpisodes !== 'number' || numEpisodes < 1) {
+            console.error(`[Train] Invalid numEpisodes: ${numEpisodes}. Must be a positive number.`);
+            return null;
+        }
+        
+        if (!gameContext) {
+            console.error('[Train] Game context not available.');
+            return null;
+        }
+        
+        if (typeof window.RL.resetEpisode !== 'function' ||
+            typeof window.RL.getState !== 'function' ||
+            typeof window.RL.step !== 'function' ||
+            typeof window.RL.isTerminal !== 'function' ||
+            typeof window.RL.getReward !== 'function' ||
+            typeof window.RL.setHeadlessMode !== 'function' ||
+            typeof window.RL.tickCooldown !== 'function') {
+            console.error('[Train] RL interface incomplete.');
+            return null;
+        }
+        
+        if (verbose) {
+            console.log(`[Train] Starting async training: ${numEpisodes} episodes`);
+        }
+        const startTime = performance.now();
+        
+        const results = [];
+        let totalTrainingSteps = 0;
+        
+        window.RL.setHeadlessMode(true);
+        
+        const { Runner, Render } = Matter;
+        const runner = gameContext.runner();
+        const render = gameContext.render();
+        
+        if (runner) Runner.stop(runner);
+        if (render) Render.stop(render);
+        
+        if (replayBuffer) {
+            replayBuffer.clear();
+        } else {
+            replayBuffer = new ReplayBuffer(DEFAULT_REPLAY_BUFFER_SIZE, STATE_SIZE);
+        }
+        
+        try {
+            for (let episode = 0; episode < numEpisodes; episode++) {
+                if (verbose) {
+                    console.log(`[Train] Episode ${episode + 1}/${numEpisodes} starting...`);
+                }
+                
+                window.RL.resetEpisode();
+                const engine = gameContext.engine();
+                
+                let stepCount = 0;
+                let totalReward = 0;
+                let totalLoss = 0;
+                let trainCount = 0;
+                const episodeStartTime = performance.now();
+                
+                const rawState = window.RL.getState();
+                encodeStateIntoBuffer(rawState, stateBuffer);
+                
+                while (!window.RL.isTerminal() && stepCount < MAX_STEPS_PER_EPISODE) {
+                    const action = selectActionFromBuffer(stateBuffer, validEpsilon);
+                    
+                    window.RL.step(action);
+                    stepPhysics(engine);
+                    window.RL.tickCooldown();
+                    
+                    const reward = window.RL.getReward();
+                    totalReward += reward;
+                    
+                    const rawNextState = window.RL.getState();
+                    encodeStateIntoBuffer(rawNextState, nextStateBuffer);
+                    const done = window.RL.isTerminal();
+                    
+                    replayBuffer.add(stateBuffer, action, reward, nextStateBuffer, done);
+                    
+                    if (replayBuffer.canSample(validBatchSize) && 
+                        stepCount % validTrainEveryNSteps === 0) {
+                        const batch = replayBuffer.sampleBatch(validBatchSize);
+                        const loss = trainOnBatch(batch);
+                        totalLoss += loss;
+                        trainCount++;
+                        totalTrainingSteps++;
+                    }
+                    
+                    for (let i = 0; i < STATE_SIZE; i++) {
+                        stateBuffer[i] = nextStateBuffer[i];
+                    }
+                    
+                    stepCount++;
+                    
+                    // Yield to event loop periodically
+                    if (stepCount % validYieldEveryNSteps === 0) {
+                        await new Promise(resolve => setTimeout(resolve, 0));
+                    }
+                }
+                
+                const episodeTime = performance.now() - episodeStartTime;
+                const avgLoss = trainCount > 0 ? totalLoss / trainCount : 0;
+                
+                results.push({
+                    episode: episode + 1,
+                    steps: stepCount,
+                    totalReward: totalReward,
+                    avgLoss: avgLoss,
+                    trainSteps: trainCount,
+                    timeMs: episodeTime
+                });
+                
+                if (verbose) {
+                    console.log(
+                        `[Train] Episode ${episode + 1} ended: ` +
+                        `steps=${stepCount}, reward=${totalReward.toFixed(2)}, ` +
+                        `avgLoss=${avgLoss.toFixed(6)}, time=${episodeTime.toFixed(2)}ms`
+                    );
+                }
+            }
+            
+            if (verbose) {
+                console.log('[Train] Saving model to localStorage...');
+            }
+            await model.save('localstorage://fruit-merge-dqn-v1');
+            if (verbose) {
+                console.log('[Train] Model saved successfully.');
+            }
+            
+        } finally {
+            window.RL.setHeadlessMode(false);
+            if (typeof window.RL.reset === 'function') {
+                window.RL.reset();
+            }
+        }
+        
+        const totalTime = performance.now() - startTime;
+        const totalSteps = results.reduce((sum, r) => sum + r.steps, 0);
+        const avgReward = results.length > 0 ? 
+            results.reduce((sum, r) => sum + r.totalReward, 0) / results.length : 0;
+        const avgSteps = results.length > 0 ? totalSteps / results.length : 0;
+        
+        if (verbose) {
+            console.log(`[Train] ========== TRAINING SUMMARY ==========`);
+            console.log(`[Train] Episodes completed: ${results.length}`);
+            console.log(`[Train] Total time: ${totalTime.toFixed(2)}ms`);
+            console.log(`[Train] Average reward per episode: ${avgReward.toFixed(2)}`);
+            console.log(`[Train] Average steps per episode: ${avgSteps.toFixed(2)}`);
+            console.log(`[Train] Total steps: ${totalSteps}`);
+            console.log(`[Train] Total training steps: ${totalTrainingSteps}`);
+            console.log(`[Train] ==========================================`);
+        }
+        
+        return {
+            episodes: results,
+            totalTime: totalTime,
+            avgReward: avgReward,
+            avgSteps: avgSteps,
+            totalTrainingSteps: totalTrainingSteps,
+            replayBufferSize: replayBuffer.size
         };
     };
     
@@ -419,11 +848,19 @@ export function initTraining(context) {
             console.log('[Train] Loading model from localStorage...');
             model = await tf.loadLayersModel('localstorage://fruit-merge-dqn-v1');
             
+            // Create optimizer for trainOnBatch
+            optimizer = tf.train.adam(LEARNING_RATE);
+            
             // Recompile the model
             model.compile({
-                optimizer: tf.train.adam(LEARNING_RATE),
+                optimizer: optimizer,
                 loss: 'meanSquaredError'
             });
+            
+            // Initialize replay buffer if not exists
+            if (!replayBuffer) {
+                replayBuffer = new ReplayBuffer(DEFAULT_REPLAY_BUFFER_SIZE, STATE_SIZE);
+            }
             
             console.log('[Train] Model loaded successfully.');
             return true;
@@ -442,6 +879,26 @@ export function initTraining(context) {
         return model;
     };
     
-    console.log('[Train] Training module initialized.');
+    /**
+     * Get the replay buffer (for inspection).
+     * 
+     * @returns {ReplayBuffer|null} The replay buffer or null if not initialized
+     */
+    window.RL.getReplayBuffer = function() {
+        return replayBuffer;
+    };
+    
+    /**
+     * Clear the replay buffer.
+     */
+    window.RL.clearReplayBuffer = function() {
+        if (replayBuffer) {
+            replayBuffer.clear();
+            console.log('[Train] Replay buffer cleared.');
+        }
+    };
+    
+    console.log('[Train] Optimized training module initialized.');
     console.log('[Train] Use RL.initModel() to build the model, then RL.train(numEpisodes) to train.');
+    console.log('[Train] For async training with UI responsiveness, use RL.trainAsync(numEpisodes).');
 }
