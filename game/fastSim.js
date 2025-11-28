@@ -87,8 +87,9 @@ export function createFastSimController(gameContext) {
             typeof window.RL.step !== 'function' ||
             typeof window.RL.isTerminal !== 'function' ||
             typeof window.RL.getReward !== 'function' ||
-            typeof window.RL.setHeadlessMode !== 'function') {
-            throw new Error('RL interface incomplete. Required: resetEpisode, getState, step, isTerminal, getReward, setHeadlessMode');
+            typeof window.RL.setHeadlessMode !== 'function' ||
+            typeof window.RL.tickCooldown !== 'function') {
+            throw new Error('RL interface incomplete. Required: resetEpisode, getState, step, isTerminal, getReward, setHeadlessMode, tickCooldown');
         }
         
         // Check if already running
@@ -170,6 +171,9 @@ export function createFastSimController(gameContext) {
                         
                         // Advance physics simulation
                         stepPhysics(currentEngine);
+                        
+                        // Tick the step-based cooldown counter
+                        window.RL.tickCooldown();
                         
                         // Get reward (optional, for future use)
                         window.RL.getReward();
