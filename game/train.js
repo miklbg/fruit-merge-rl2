@@ -97,7 +97,7 @@ function initModel() {
     
     // Compile with Adam optimizer and MSE loss
     model.compile({
-        optimizer: tf.train.adam(CONFIG.learningRate),
+        optimizer: tf.train.adam({ learningRate: CONFIG.learningRate }),
         loss: 'meanSquaredError'
     });
     
@@ -158,17 +158,35 @@ function storeExperience(s, a, r, s2, done) {
 
 /**
  * Sample a random batch of experiences from the replay buffer.
+ * Uses Fisher-Yates partial shuffle to sample without replacement.
  * 
  * @param {number} batchSize - Number of experiences to sample
  * @returns {Object[]} Array of experience objects
  */
 function sampleBatch(batchSize) {
-    const batch = [];
     const bufferSize = replayBuffer.length;
     
+    // If batch size is larger than buffer, sample all (with replacement fallback)
+    if (batchSize >= bufferSize) {
+        return [...replayBuffer];
+    }
+    
+    // Create array of indices
+    const indices = new Array(bufferSize);
+    for (let i = 0; i < bufferSize; i++) {
+        indices[i] = i;
+    }
+    
+    // Partial Fisher-Yates shuffle to get batchSize random unique indices
+    const batch = [];
     for (let i = 0; i < batchSize; i++) {
-        const idx = Math.floor(Math.random() * bufferSize);
-        batch.push(replayBuffer[idx]);
+        const j = i + Math.floor(Math.random() * (bufferSize - i));
+        // Swap indices[i] and indices[j]
+        const temp = indices[i];
+        indices[i] = indices[j];
+        indices[j] = temp;
+        
+        batch.push(replayBuffer[indices[i]]);
     }
     
     return batch;
@@ -393,7 +411,7 @@ async function loadModel() {
         
         // Recompile the model (needed after loading)
         model.compile({
-            optimizer: tf.train.adam(CONFIG.learningRate),
+            optimizer: tf.train.adam({ learningRate: CONFIG.learningRate }),
             loss: 'meanSquaredError'
         });
         
