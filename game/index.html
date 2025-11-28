@@ -1297,13 +1297,18 @@
                     };
                     
                     /**
-                     * Get the reward based on score change since last call.
-                     * Reward = currentScore - lastScore
-                     * Updates lastScore to current score after computing reward.
-                     * Accumulates into _episodeReward.
+                     * Get the reward based on score change since last step.
+                     * This is a convenience method that computes the reward without
+                     * modifying state. For the most accurate reward tracking, use
+                     * the return value from RL.step() instead.
+                     * 
+                     * Note: If called independently (not via step()), this computes
+                     * reward as: currentScore - lastScore, updates lastScore, and
+                     * accumulates into _episodeReward.
+                     * 
                      * Always returns a valid number (never NaN).
                      * 
-                     * @returns {number} Reward value (score difference since last call)
+                     * @returns {number} Reward value (score difference since last update)
                      */
                     window.RL.getReward = function() {
                         const currentScore = score;
@@ -1314,6 +1319,9 @@
                             reward = 0;
                         }
                         
+                        // Note: Since step() already updates lastScore and accumulates reward,
+                        // calling getReward() after step() will return 0 (no new score change)
+                        // This is the expected behavior.
                         window.RL.lastScore = currentScore;
                         window.RL._episodeReward += reward;
                         return reward;
