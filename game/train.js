@@ -207,11 +207,15 @@ export async function trainEpisodes(numEpisodes) {
     const runner = window.RL.getRunner();
     const render = window.RL.getRender();
     
-    if (runner && Matter && Matter.Runner) {
-        Matter.Runner.stop(runner);
-    }
-    if (render && Matter && Matter.Render) {
-        Matter.Render.stop(render);
+    // Note: Matter.js is expected to be available globally when this code runs
+    // These checks are defensive in case the global isn't available
+    if (typeof Matter !== 'undefined') {
+        if (runner && Matter.Runner) {
+            Matter.Runner.stop(runner);
+        }
+        if (render && Matter.Render) {
+            Matter.Render.stop(render);
+        }
     }
     
     try {
