@@ -193,12 +193,6 @@ export async function trainEpisodes(numEpisodes) {
         // Reset episode
         window.RL.resetEpisode();
         
-        // Wait for the game to reinitialize after reset.
-        // In non-headless mode, resetEpisode() calls handleRestart() which reinitializes
-        // the physics engine, renderer, and game state. 100ms allows these async operations
-        // to complete before we start the next episode.
-        await new Promise(resolve => setTimeout(resolve, 100));
-        
         let steps = 0;
         let totalReward = 0;
         let done = false;
@@ -227,11 +221,10 @@ export async function trainEpisodes(numEpisodes) {
             totalReward += reward;
             steps++;
             
-            // Yield to event loop every step to allow physics to advance.
-            // In non-headless mode, the Matter.js runner advances physics via requestAnimationFrame.
-            // Note: This makes training slower but allows the game to render properly.
-            // For faster training, use FastSim.run() in headless mode instead.
-            await new Promise(resolve => setTimeout(resolve, 0));
+            // Yield to event loop periodically
+            if (steps % 50 === 0) {
+                await new Promise(resolve => setTimeout(resolve, 0));
+            }
         }
         
         const episodeResult = {
