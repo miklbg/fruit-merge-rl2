@@ -7,14 +7,14 @@
  * - Replay buffer with random sampling
  * - trainOnBatch() for faster gradient updates
  * - tf.tidy() wrapping for automatic memory management
- * - Synchronous training loop (minimal async overhead)
+ * - Async training loop with periodic yields (prevents browser freeze)
  * - Completely headless training (no DOM/rendering)
  * 
  * Usage:
  *   RL.initModel();                        // Build and compile model
- *   RL.train(5);                           // Run 5 episodes of training
- *   RL.train(5, { batchSize: 64 });        // Use batch size of 64
- *   RL.train(5, { epsilon: 0.1 });         // Use 10% random exploration
+ *   await RL.train(5);                     // Run 5 episodes of training
+ *   await RL.train(5, { batchSize: 64 });  // Use batch size of 64
+ *   await RL.train(5, { epsilon: 0.1 });   // Use 10% random exploration
  * 
  * @module train
  */
@@ -368,22 +368,24 @@ export function initTraining(context) {
     
     /**
      * Run training for the specified number of episodes.
-     * Uses a fully synchronous loop with experience replay.
+     * Uses experience replay with periodic yields to prevent browser freezing.
      * 
      * @param {number} numEpisodes - Number of episodes to train
      * @param {Object} [options={}] - Optional configuration options
      * @param {number} [options.batchSize=64] - Minibatch size for training
      * @param {number} [options.epsilon=0.1] - Exploration rate for epsilon-greedy action selection (0-1)
      * @param {number} [options.trainEveryNSteps=4] - Train every N steps
+     * @param {number} [options.yieldEveryNSteps=100] - Yield to event loop every N steps to prevent browser freeze
      * @param {boolean} [options.verbose=true] - Whether to log progress
-     * @returns {Object} Training results summary (synchronous)
+     * @returns {Promise<Object>} Training results summary
      */
-    window.RL.train = function(numEpisodes, options = {}) {
+    window.RL.train = async function(numEpisodes, options = {}) {
         // Extract options with defaults
         const {
             batchSize = DEFAULT_BATCH_SIZE,
             epsilon = 0.1,
             trainEveryNSteps = 4,
+            yieldEveryNSteps = 100,
             verbose = true
         } = options;
         
@@ -391,6 +393,7 @@ export function initTraining(context) {
         const validEpsilon = Math.max(0, Math.min(1, epsilon));
         const validBatchSize = Math.max(1, Math.floor(batchSize));
         const validTrainEveryNSteps = Math.max(1, Math.floor(trainEveryNSteps));
+        const validYieldEveryNSteps = Math.max(1, Math.floor(yieldEveryNSteps));
         
         // Validate model is initialized
         if (!model) {
@@ -482,7 +485,7 @@ export function initTraining(context) {
                 const rawState = window.RL.getState();
                 encodeStateIntoBuffer(rawState, stateBuffer);
                 
-                // Episode loop - synchronous, no awaits
+                // Episode loop with periodic yields to prevent browser freeze
                 while (!window.RL.isTerminal() && stepCount < MAX_STEPS_PER_EPISODE) {
                     // Select action using epsilon-greedy policy
                     const action = selectActionFromBuffer(stateBuffer, validEpsilon);
@@ -524,6 +527,11 @@ export function initTraining(context) {
                     }
                     
                     stepCount++;
+                    
+                    // Yield to event loop periodically to prevent browser freeze
+                    if (stepCount % validYieldEveryNSteps === 0) {
+                        await new Promise(resolve => setTimeout(resolve, 0));
+                    }
                 }
                 
                 const episodeTime = performance.now() - episodeStartTime;
@@ -550,17 +558,18 @@ export function initTraining(context) {
                 }
             }
             
-            // Save model to localStorage (this is async but we fire and forget)
+            // Save model to localStorage
             if (verbose) {
                 console.log('[Train] Saving model to localStorage...');
             }
-            model.save('localstorage://fruit-merge-dqn-v1').then(() => {
+            try {
+                await model.save('localstorage://fruit-merge-dqn-v1');
                 if (verbose) {
                     console.log('[Train] Model saved successfully to localstorage://fruit-merge-dqn-v1');
                 }
-            }).catch(err => {
+            } catch (err) {
                 console.error('[Train] Failed to save model:', err);
-            });
+            }
             
         } finally {
             // Restore normal mode
@@ -851,6 +860,6 @@ export function initTraining(context) {
     };
     
     console.log('[Train] Optimized training module initialized.');
-    console.log('[Train] Use RL.initModel() to build the model, then RL.train(numEpisodes) to train.');
-    console.log('[Train] For async training with UI responsiveness, use RL.trainAsync(numEpisodes).');
+    console.log('[Train] Use RL.initModel() to build the model, then await RL.train(numEpisodes) to train.');
+    console.log('[Train] Both RL.train() and RL.trainAsync() yield to event loop to prevent browser freeze.');
 }
