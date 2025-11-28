@@ -566,6 +566,9 @@
             const BASE_WALL_THICKNESS = 40 * NATIVE_SCALE;
             const GROUND_HEIGHT = 48 * NATIVE_SCALE; // 20% taller than walls (matches world.png: 120px vs 100px)
             const DROP_COOLDOWN_MS = 400;
+            // Calculate cooldown steps for headless/FastSim mode (at 60 FPS)
+            const PHYSICS_FPS = 60;
+            const DROP_COOLDOWN_STEPS = Math.ceil(DROP_COOLDOWN_MS * PHYSICS_FPS / 1000); // 400ms * 60 / 1000 = 24 steps
             const HIGHSCORE_KEY = 'fruit-merge-highscore';
             const GAME_STATE_KEY = 'fruit-merge-gamestate';
             const ACHIEVEMENTS_KEY = 'fruit-merge-achievements';
@@ -633,6 +636,7 @@
             let boosterReenableTimeout = null;
             let isGameOverAnimating = false; // Flag to prevent actions during game over animation
             let isHeadlessMode = false; // Flag to disable rendering and audio during FastSim
+            let dropCooldownStepsRemaining = 0; // Step-based cooldown counter for headless/FastSim mode
             
             function updateBoosterIndicator() {
                 if (!boosterUnlocked) {
@@ -1306,6 +1310,7 @@
                             isDropping = false;
                             isGameOverAnimating = false;
                             lastDropTime = 0;
+                            dropCooldownStepsRemaining = 0; // Reset step-based cooldown
                             lastDroppedFruit = null;
                             currentGameMaxFruit = -1;
                             boosterCooldownCount = 0;
@@ -1389,6 +1394,17 @@
                      */
                     window.RL.isHeadlessMode = function() {
                         return isHeadlessMode;
+                    };
+                    
+                    /**
+                     * Tick the step-based cooldown counter (for headless/FastSim mode).
+                     * Should be called once per physics step.
+                     * Decrements the drop cooldown counter if it's greater than 0.
+                     */
+                    window.RL.tickCooldown = function() {
+                        if (dropCooldownStepsRemaining > 0) {
+                            dropCooldownStepsRemaining--;
+                        }
                     };
                     
                     // --- Initialize FastSim for headless simulation ---
@@ -1851,10 +1867,18 @@
             function dropFruit() {
                 if (isGameOver || isDropping) return;
 
-                // Check cooldown period to limit drop frequency (skip in headless mode)
+                // Check cooldown period to limit drop frequency
                 const currentTime = Date.now();
-                if (!isHeadlessMode && currentTime - lastDropTime < DROP_COOLDOWN_MS) {
-                    return; // Still in cooldown period
+                if (isHeadlessMode) {
+                    // In headless mode, use step-based cooldown
+                    if (dropCooldownStepsRemaining > 0) {
+                        return; // Still in cooldown period
+                    }
+                } else {
+                    // In normal mode, use time-based cooldown
+                    if (currentTime - lastDropTime < DROP_COOLDOWN_MS) {
+                        return; // Still in cooldown period
+                    }
                 }
 
                 // Check if any fruits are already resting above the game over line
@@ -1876,6 +1900,11 @@
 
                 isDropping = true;
                 lastDropTime = currentTime; // Record the drop time
+                
+                // Set step-based cooldown for headless mode
+                if (isHeadlessMode) {
+                    dropCooldownStepsRemaining = DROP_COOLDOWN_STEPS;
+                }
                 
                 // Decrement booster cooldown counter
                 if (boosterCooldownCount > 0) {
