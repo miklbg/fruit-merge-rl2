@@ -345,14 +345,17 @@ export function initTraining(context) {
             return;
         }
         
-        // Get weights from main model
+        // Get weights from main model and clone them for the target model
+        // Note: We don't dispose mainWeights as they may be the actual model weight tensors
+        // The cloned weights are disposed after setWeights copies their data
         const mainWeights = model.getWeights();
+        const clonedWeights = mainWeights.map(w => w.clone());
         
-        // Set weights on target model
-        targetModel.setWeights(mainWeights);
+        // Set cloned weights on target model
+        targetModel.setWeights(clonedWeights);
         
-        // Dispose of weight tensors to prevent memory leak
-        mainWeights.forEach(w => w.dispose());
+        // Dispose of the cloned tensors (setWeights copies the data internally)
+        clonedWeights.forEach(w => w.dispose());
     }
     
     /**
