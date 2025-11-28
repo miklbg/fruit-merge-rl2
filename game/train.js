@@ -281,12 +281,19 @@ export function initTraining(context) {
                     // Select action (pure exploitation - argmax Q-values)
                     const action = selectAction(state);
                     
-                    // Log Q-values periodically for debugging
+                    // Log Q-values and render a single frame periodically for debugging
                     if (stepCount % 500 === 0) {
                         const qValues = getQValues(state);
                         const qArray = qValues.dataSync();
                         console.log(`[Train] Episode ${episode + 1}, Step ${stepCount}: Q-values = [${qArray.map(q => q.toFixed(4)).join(', ')}]`);
                         qValues.dispose();
+                        
+                        // Render a single frame for visual debugging
+                        if (render) {
+                            window.RL.setHeadlessMode(false);
+                            Render.world(render);
+                            window.RL.setHeadlessMode(true);
+                        }
                     }
                     
                     // Execute action
