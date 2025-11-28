@@ -196,7 +196,7 @@ export function createFastSimController(gameContext) {
                         window.RL.setHeadlessMode(false);
                         Render.world(render);
                         window.RL.setHeadlessMode(true);
-                        console.log(`[FastSim] Episode ${episodeIdx}: Rendered game over state`);
+                        console.log(`[FastSim] Episode ${episodeIdx}: Rendered fruits at game over state`);
                     }
                 }
                 
@@ -315,7 +315,7 @@ export function initFastSim(gameContext) {
         stop: controller.stop
     };
     
-    console.log('[FastSim] Initialized. Use FastSim.run(numEpisodes, { renderOnGameOver: true }) to start simulation.');
+    console.log('[FastSim] Initialized. Use FastSim.run(numEpisodes) or FastSim.run(numEpisodes, { renderOnGameOver: true }) to start simulation.');
     
     return controller;
 }
