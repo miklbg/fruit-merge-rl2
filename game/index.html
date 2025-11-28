@@ -26,8 +26,6 @@
     <link rel="stylesheet" href="css/tailwind.min.css">
     <!-- Load Matter.js Physics Engine -->
     <script src="matter.min.js"></script>
-    <!-- Load TensorFlow.js for RL training -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
 
     <!-- Load font -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -496,9 +494,6 @@
         
         // Import FastSim for headless simulation
         import { initFastSim } from './fastSim.js';
-        
-        // Import training module for RL
-        import { initModel, predictAction, trainOneStep, trainEpisodes } from './train.js';
         
         // Expose global function for console testing
         window.runRandomAgent = (options) => startRandomAgentTest(options);
@@ -1465,10 +1460,6 @@
                         getScore: () => score,
                         getIsGameOver: () => isGameOver
                     });
-                    
-                    // --- Expose Training API ---
-                    window.RL.initModel = initModel;
-                    window.RL.train = trainEpisodes;
                 }
             }, 50);
 
