@@ -5,8 +5,11 @@
  * This is a minimal test loop to verify the RL environment works correctly.
  * 
  * Usage:
- *   RL.initModel();        // Build and compile model
- *   RL.train(5);           // Run 5 episodes of training
+ *   RL.initModel();                        // Build and compile model
+ *   RL.train(5);                           // Run 5 episodes of training
+ *   RL.train(5, { renderEveryNSteps: 100 }); // Render every 100 steps
+ *   RL.train(5, { renderEveryNSteps: 0 });   // Disable rendering
+ *   RL.train(5, { epsilon: 0.1 });           // Use 10% random exploration
  * 
  * @module train
  */
@@ -119,12 +122,21 @@ export function initTraining(context) {
     }
     
     /**
-     * Select action using pure exploitation (argmax of Q-values).
+     * Select action using epsilon-greedy policy.
+     * With probability epsilon, selects a random action (exploration).
+     * With probability 1-epsilon, selects the action with highest Q-value (exploitation).
      * 
      * @param {number[]} state - State array of length 155
+     * @param {number} epsilon - Exploration rate (0-1). Default 0 for pure exploitation.
      * @returns {number} Action index (0-3)
      */
-    function selectAction(state) {
+    function selectAction(state, epsilon = 0) {
+        // Epsilon-greedy: with probability epsilon, choose random action
+        if (epsilon > 0 && Math.random() < epsilon) {
+            return Math.floor(Math.random() * NUM_ACTIONS);
+        }
+        
+        // Otherwise, choose action with highest Q-value (exploitation)
         const qValues = getQValues(state);
         const action = qValues.argMax(1).dataSync()[0];
         qValues.dispose();
@@ -198,9 +210,16 @@ export function initTraining(context) {
      * Uses FastSim for headless simulation.
      * 
      * @param {number} numEpisodes - Number of episodes to train
+     * @param {Object} [options={}] - Optional configuration options
+     * @param {number} [options.renderEveryNSteps=500] - Render a frame every N steps for visual debugging. Set to 0 or null to disable.
+     * @param {number} [options.epsilon=0.1] - Exploration rate for epsilon-greedy action selection (0-1). Default 0.1 for 10% random exploration.
      * @returns {Promise<Object>} Training results summary
      */
-    window.RL.train = async function(numEpisodes) {
+    window.RL.train = async function(numEpisodes, options = {}) {
+        // Extract options with defaults
+        const renderEveryNSteps = options.renderEveryNSteps !== undefined ? options.renderEveryNSteps : 500;
+        const epsilon = options.epsilon !== undefined ? options.epsilon : 0.1;
+        
         // Validate model is initialized
         if (!model) {
             console.error('[Train] Model not initialized. Call RL.initModel() first.');
@@ -231,7 +250,7 @@ export function initTraining(context) {
             return null;
         }
         
-        console.log(`[Train] Starting training: ${numEpisodes} episodes`);
+        console.log(`[Train] Starting training: ${numEpisodes} episodes, epsilon=${epsilon}, renderEveryNSteps=${renderEveryNSteps}`);
         const startTime = performance.now();
         
         const results = [];
@@ -278,14 +297,14 @@ export function initTraining(context) {
                 
                 // Episode loop
                 while (!window.RL.isTerminal() && stepCount < MAX_STEPS_PER_EPISODE) {
-                    // Select action (pure exploitation - argmax Q-values)
-                    const action = selectAction(state);
+                    // Select action using epsilon-greedy policy
+                    const action = selectAction(state, epsilon);
                     
-                    // Log Q-values and render a single frame periodically for debugging
-                    if (stepCount % 500 === 0) {
+                    // Log Q-values and optionally render a single frame periodically for debugging
+                    if (renderEveryNSteps > 0 && stepCount % renderEveryNSteps === 0) {
                         const qValues = getQValues(state);
                         const qArray = qValues.dataSync();
-                        console.log(`[Train] Episode ${episode + 1}, Step ${stepCount}: Q-values = [${qArray.map(q => q.toFixed(4)).join(', ')}]`);
+                        console.log(`[Train] Episode ${episode + 1}, Step ${stepCount}: Q-values = [${qArray.map(q => q.toFixed(4)).join(', ')}], action=${action}`);
                         qValues.dispose();
                         
                         // Render a single frame for visual debugging
