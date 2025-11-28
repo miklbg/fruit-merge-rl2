@@ -566,9 +566,9 @@
             const BASE_WALL_THICKNESS = 40 * NATIVE_SCALE;
             const GROUND_HEIGHT = 48 * NATIVE_SCALE; // 20% taller than walls (matches world.png: 120px vs 100px)
             const DROP_COOLDOWN_MS = 400;
-            // Calculate cooldown steps for headless/FastSim mode (at 60 FPS)
+            // Calculate cooldown steps for headless/FastSim mode at the physics simulation rate
             const PHYSICS_FPS = 60;
-            const DROP_COOLDOWN_STEPS = Math.ceil(DROP_COOLDOWN_MS * PHYSICS_FPS / 1000); // 400ms * 60 / 1000 = 24 steps
+            const DROP_COOLDOWN_STEPS = Math.ceil(DROP_COOLDOWN_MS * PHYSICS_FPS / 1000);
             const HIGHSCORE_KEY = 'fruit-merge-highscore';
             const GAME_STATE_KEY = 'fruit-merge-gamestate';
             const ACHIEVEMENTS_KEY = 'fruit-merge-achievements';
