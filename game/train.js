@@ -487,7 +487,7 @@ export function initTraining(context) {
      * @param {number} [options.epsilon=0.1] - Fixed epsilon for exploration (ignored if epsilonStart is provided)
      * @param {number} [options.epsilonStart=1.0] - Starting epsilon for decay schedule
      * @param {number} [options.epsilonEnd=0.01] - Minimum epsilon after decay
-     * @param {number} [options.epsilonDecay=0.995] - Multiplicative decay factor per step
+     * @param {number} [options.epsilonDecay=0.995] - Multiplicative decay factor per episode
      * @param {number} [options.targetUpdateEvery=1000] - Update target model every N training steps
      * @param {number} [options.yieldEveryNSteps=100] - Yield to event loop every N steps to prevent browser freeze
      * @param {boolean} [options.verbose=true] - Whether to log progress
@@ -685,15 +685,15 @@ export function initTraining(context) {
                     stepCount++;
                     totalStepsAllEpisodes++;
                     
-                    // Decay epsilon after each step (if using dynamic epsilon)
-                    if (useDynamicEpsilon) {
-                        currentEpsilon = Math.max(validEpsilonEnd, currentEpsilon * validEpsilonDecay);
-                    }
-                    
                     // Yield to event loop periodically to prevent browser freeze
                     if (stepCount % validYieldEveryNSteps === 0) {
                         await new Promise(resolve => setTimeout(resolve, 0));
                     }
+                }
+                
+                // Decay epsilon once per episode (if using dynamic epsilon and buffer has enough samples)
+                if (useDynamicEpsilon && replayBuffer.size() >= validMinBufferSize) {
+                    currentEpsilon = Math.max(validEpsilonEnd, currentEpsilon * validEpsilonDecay);
                 }
                 
                 const episodeTime = performance.now() - episodeStartTime;
@@ -716,7 +716,8 @@ export function initTraining(context) {
                         `[Train] Episode ${episode + 1} ended: ` +
                         `steps=${stepCount}, reward=${totalReward.toFixed(2)}, ` +
                         `epsilon=${episodeStartEpsilon.toFixed(4)}, avgLoss=${avgLoss.toFixed(6)}, ` +
-                        `trainSteps=${trainCount}, duration=${episodeTime.toFixed(2)}ms`
+                        `trainSteps=${trainCount}, duration=${episodeTime.toFixed(2)}ms, ` +
+                        `nextEpsilon=${currentEpsilon.toFixed(4)}`
                     );
                 }
             }
@@ -939,15 +940,15 @@ export function initTraining(context) {
                     
                     stepCount++;
                     
-                    // Decay epsilon after each step (if using dynamic epsilon)
-                    if (useDynamicEpsilon) {
-                        currentEpsilon = Math.max(validEpsilonEnd, currentEpsilon * validEpsilonDecay);
-                    }
-                    
                     // Yield to event loop periodically
                     if (stepCount % validYieldEveryNSteps === 0) {
                         await new Promise(resolve => setTimeout(resolve, 0));
                     }
+                }
+                
+                // Decay epsilon once per episode (if using dynamic epsilon and buffer has enough samples)
+                if (useDynamicEpsilon && replayBuffer.size() >= validMinBufferSize) {
+                    currentEpsilon = Math.max(validEpsilonEnd, currentEpsilon * validEpsilonDecay);
                 }
                 
                 const episodeTime = performance.now() - episodeStartTime;
@@ -968,7 +969,8 @@ export function initTraining(context) {
                         `[Train] Episode ${episode + 1} ended: ` +
                         `steps=${stepCount}, reward=${totalReward.toFixed(2)}, ` +
                         `epsilon=${episodeStartEpsilon.toFixed(4)}, avgLoss=${avgLoss.toFixed(6)}, ` +
-                        `trainSteps=${trainCount}, duration=${episodeTime.toFixed(2)}ms`
+                        `trainSteps=${trainCount}, duration=${episodeTime.toFixed(2)}ms, ` +
+                        `nextEpsilon=${currentEpsilon.toFixed(4)}`
                     );
                 }
             }
