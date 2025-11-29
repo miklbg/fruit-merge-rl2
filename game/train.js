@@ -209,7 +209,7 @@ class ReplayBuffer {
      * Importance weight: w(i) = (N * P(i))^(-β) / max(w)
      * 
      * @param {number} batchSize - Number of transitions to sample
-     * @returns {{states: Float32Array, actions: Uint8Array, rewards: Float32Array, nextStates: Float32Array, dones: Uint8Array, indices: Uint32Array, weights: Float32Array, actualBatchSize: number, meanPriority: number}}
+     * @returns {{states: Float32Array, actions: Uint8Array, rewards: Float32Array, nextStates: Float32Array, dones: Uint8Array, indices: Uint32Array, weights: Float32Array, actualBatchSize: number, meanTDError: number}}
      */
     getPrioritizedBatch(batchSize) {
         const actualBatchSize = Math.min(batchSize, this._size);
@@ -222,7 +222,6 @@ class ReplayBuffer {
         }
         
         // Sort indices by TD error (descending order - highest error first)
-        // Use a simple insertion sort for small arrays, otherwise use built-in sort
         const indices = Array.from(this._sortedIndices.subarray(0, this._size));
         const errors = this._sortBuffer;
         indices.sort((a, b) => errors[b] - errors[a]);
@@ -258,8 +257,8 @@ class ReplayBuffer {
             cumulative[i] = cumulative[i - 1] + probabilities[i];
         }
         
-        // Track priorities for logging
-        let totalPriority = 0;
+        // Track TD errors for logging
+        let totalTDError = 0;
         
         // Sample using inverse transform sampling
         for (let i = 0; i < actualBatchSize; i++) {
@@ -301,7 +300,7 @@ class ReplayBuffer {
             // w(i) = (N * P(i))^(-β)
             const prob = probabilities[low];
             weights[i] = Math.pow(this._size * prob, -PRIORITY_BETA);
-            totalPriority += this.tdErrors[bufferIdx];
+            totalTDError += this.tdErrors[bufferIdx];
         }
         
         // Normalize weights by max weight for stability
@@ -317,7 +316,7 @@ class ReplayBuffer {
             }
         }
         
-        const meanPriority = totalPriority / actualBatchSize;
+        const meanTDError = totalTDError / actualBatchSize;
         
         return {
             states: batchStates,
@@ -328,7 +327,7 @@ class ReplayBuffer {
             indices: sampledIndices,
             weights: weights,
             actualBatchSize,
-            meanPriority
+            meanTDError
         };
     }
     
@@ -951,7 +950,7 @@ export function initTraining(context) {
                 let totalReward = 0;
                 let totalLoss = 0;
                 let trainCount = 0;
-                let totalMeanPriority = 0; // Track mean priority for logging
+                let totalMeanTDError = 0; // Track mean TD error for logging
                 const episodeStartTime = performance.now();
                 const episodeStartEpsilon = currentEpsilon;
                 
@@ -1024,7 +1023,7 @@ export function initTraining(context) {
                         replayBuffer.updateTDErrors(batch.indices, tdErrors);
                         
                         totalLoss += loss;
-                        totalMeanPriority += batch.meanPriority;
+                        totalMeanTDError += batch.meanTDError;
                         trainCount++;
                         totalTrainingSteps++;
                         
@@ -1058,7 +1057,7 @@ export function initTraining(context) {
                 
                 const episodeTime = performance.now() - episodeStartTime;
                 const avgLoss = trainCount > 0 ? totalLoss / trainCount : 0;
-                const avgMeanPriority = trainCount > 0 ? totalMeanPriority / trainCount : 0;
+                const avgMeanTDError = trainCount > 0 ? totalMeanTDError / trainCount : 0;
                 
                 const episodeResult = {
                     episode: episode + 1,
@@ -1075,7 +1074,7 @@ export function initTraining(context) {
                         stepPenalty: totalStepPenalty,
                         gameOver: totalGameOverPenalty
                     },
-                    avgMeanPriority: avgMeanPriority
+                    avgMeanTDError: avgMeanTDError
                 };
                 
                 results.push(episodeResult);
@@ -1093,7 +1092,7 @@ export function initTraining(context) {
                         `stepPenalty=${totalStepPenalty.toFixed(0)}, gameOver=${totalGameOverPenalty.toFixed(0)}`
                     );
                     if (trainCount > 0) {
-                        console.log(`[Train] Mean priority: ${avgMeanPriority.toFixed(4)}`);
+                        console.log(`[Train] Mean TD error: ${avgMeanTDError.toFixed(4)}`);
                     }
                 }
             }
@@ -1267,7 +1266,7 @@ export function initTraining(context) {
                 let totalReward = 0;
                 let totalLoss = 0;
                 let trainCount = 0;
-                let totalMeanPriority = 0; // Track mean priority for logging
+                let totalMeanTDError = 0; // Track mean TD error for logging
                 const episodeStartTime = performance.now();
                 const episodeStartEpsilon = currentEpsilon;
                 
@@ -1332,7 +1331,7 @@ export function initTraining(context) {
                         replayBuffer.updateTDErrors(batch.indices, tdErrors);
                         
                         totalLoss += loss;
-                        totalMeanPriority += batch.meanPriority;
+                        totalMeanTDError += batch.meanTDError;
                         trainCount++;
                         totalTrainingSteps++;
                         
@@ -1364,7 +1363,7 @@ export function initTraining(context) {
                 
                 const episodeTime = performance.now() - episodeStartTime;
                 const avgLoss = trainCount > 0 ? totalLoss / trainCount : 0;
-                const avgMeanPriority = trainCount > 0 ? totalMeanPriority / trainCount : 0;
+                const avgMeanTDError = trainCount > 0 ? totalMeanTDError / trainCount : 0;
                 
                 results.push({
                     episode: episode + 1,
@@ -1381,7 +1380,7 @@ export function initTraining(context) {
                         stepPenalty: totalStepPenalty,
                         gameOver: totalGameOverPenalty
                     },
-                    avgMeanPriority: avgMeanPriority
+                    avgMeanTDError: avgMeanTDError
                 });
                 
                 if (verbose) {
@@ -1397,7 +1396,7 @@ export function initTraining(context) {
                         `stepPenalty=${totalStepPenalty.toFixed(0)}, gameOver=${totalGameOverPenalty.toFixed(0)}`
                     );
                     if (trainCount > 0) {
-                        console.log(`[Train] Mean priority: ${avgMeanPriority.toFixed(4)}`);
+                        console.log(`[Train] Mean TD error: ${avgMeanTDError.toFixed(4)}`);
                     }
                 }
             }
