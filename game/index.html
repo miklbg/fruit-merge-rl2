@@ -2553,6 +2553,14 @@
             }
             
             // --- RL Controls ---
+            // RL Controls configuration constants
+            const RL_TRAINING_EPISODES = 5;
+            const RL_EPSILON_START = 1.0;
+            const RL_EPSILON_END = 0.1;
+            const RL_EPSILON_DECAY = 0.9;
+            const RL_REALTIME_EPSILON = 0.05;  // Small exploration during real-time play
+            const RL_ACTION_INTERVAL_MS = 100;  // 10 actions per second
+            
             let isRLTraining = false;
             let isRLPlaying = false;
             let rlPlayInterval = null;
@@ -2603,17 +2611,17 @@
                             window.RL.initModel();
                         }
                         
-                        updateRLStatus('Training in progress (5 episodes)...');
+                        updateRLStatus(`Training in progress (${RL_TRAINING_EPISODES} episodes)...`);
                         
                         // Close the modal to show the game during training
                         rlControlsModal.classList.add('hidden');
                         
                         // Run training
-                        const result = await window.RL.train(5, {
+                        const result = await window.RL.train(RL_TRAINING_EPISODES, {
                             verbose: true,
-                            epsilonStart: 1.0,
-                            epsilonEnd: 0.1,
-                            epsilonDecay: 0.9
+                            epsilonStart: RL_EPSILON_START,
+                            epsilonEnd: RL_EPSILON_END,
+                            epsilonDecay: RL_EPSILON_DECAY
                         });
                         
                         // Show the modal again after training
@@ -2714,14 +2722,14 @@
                     // Get current state and select action
                     if (typeof window.RL !== 'undefined' && window.RL.getState && window.RL.selectAction) {
                         const state = window.RL.getState();
-                        const action = window.RL.selectAction(state, 0.05); // Small epsilon for some exploration
+                        const action = window.RL.selectAction(state, RL_REALTIME_EPSILON);
                         
                         // Execute the action
                         if (window.RL.step) {
                             window.RL.step(action);
                         }
                     }
-                }, 100); // 10 actions per second
+                }, RL_ACTION_INTERVAL_MS);
             }
             
             function stopRLPlay() {
