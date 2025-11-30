@@ -791,14 +791,13 @@ export function initTraining(context) {
      * @param {Object} batch - Sampled batch from replay buffer
      * @param {number} gamma - Discount factor for Q-learning
      * @param {boolean} verbose - Whether to log Double-DQN updates
-     * @returns {{loss: number, tdErrors: Float32Array, maxGradNorm: number}} Training loss, TD errors, and max gradient norm
+     * @returns {{loss: number, tdErrors: Float32Array}} Training loss and TD errors for priority update
      */
     function trainOnBatch(batch, gamma, verbose = false) {
         const { states, actions, rewards, nextStates, dones, weights, actualBatchSize } = batch;
         
         // Track TD errors for prioritized replay
         const tdErrors = new Float32Array(actualBatchSize);
-        let maxGradNorm = 0;
         
         // Compute targets and TD errors using Double DQN inside tf.tidy()
         const { targets, currentQForActions } = tf.tidy(() => {
@@ -918,7 +917,7 @@ export function initTraining(context) {
             weightsTensor.dispose();
         }
         
-        return { loss: lossValue, tdErrors, maxGradNorm };
+        return { loss: lossValue, tdErrors };
     }
     
     /**
