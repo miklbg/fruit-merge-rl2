@@ -402,11 +402,11 @@ export function initTraining(context) {
     const MAX_STEPS_PER_EPISODE = 10000;
     
     // Reward shaping constants
-    const REWARD_MERGE = 1;           // +10 for every fruit merge
-    const REWARD_LARGE_FRUIT = 5;     // +50 for creating large/rare fruit (level >= 5)
-    const REWARD_STEP_PENALTY = 0;    // -1 per step to encourage faster play
-    const REWARD_GAME_OVER = -200;      // -20 on game over
-    const LARGE_FRUIT_THRESHOLD = 6;   // Fruit level 5 or higher is considered "large"
+    const REWARD_MERGE = 10;           // +10 for every fruit merge
+    const REWARD_LARGE_FRUIT = 40;     // +40 for creating large/rare fruit (level >= 5)
+    const REWARD_STEP_PENALTY = 0.1;    // 0 per step to 
+    const REWARD_GAME_OVER = -200;      // -200 on game over
+    const LARGE_FRUIT_THRESHOLD = 6;   // Fruit level 6 or higher is considered "large"
     
     // Model references
     let model = null;
