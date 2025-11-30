@@ -404,7 +404,7 @@ export function initTraining(context) {
     // Reward shaping constants
     const REWARD_MERGE = 10;           // +10 for every fruit merge
     const REWARD_LARGE_FRUIT = 40;     // +40 for creating large/rare fruit (level >= 5)
-    const REWARD_STEP_PENALTY = 0.1;    // 0.1 per step to survive
+    const REWARD_STEP_PENALTY = 0.01;    // 0.01 reward per step to survive
     const REWARD_GAME_OVER = -200;      // -200 on game over
     const LARGE_FRUIT_THRESHOLD = 6;   // Fruit level 6 or higher is considered "large"
     
@@ -1550,5 +1550,5 @@ export function initTraining(context) {
     console.log('[Train] Use RL.initModel() to build the model, then await RL.train(numEpisodes) to train.');
     console.log('[Train] Both RL.train() and RL.trainAsync() yield to event loop to prevent browser freeze.');
     console.log('[Train] Features: Double DQN, rank-based prioritized replay (α=0.7, β=0.5), reward shaping.');
-    console.log('[Train] Reward shaping: +10 merge, +50 large fruit, -1 step penalty, -20 game over.');
+    console.log('[Train] Reward shaping: +10 merge, +50 large fruit, +0.01 step reward, -200 game over.');
 }
