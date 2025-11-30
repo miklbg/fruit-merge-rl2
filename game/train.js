@@ -1158,7 +1158,7 @@ export function initTraining(context) {
                         if (totalTrainingSteps % validTargetUpdateEvery === 0) {
                             updateTargetModel();
                             if (verbose) {
-                                console.log(`[Train] Double-DQN target model updated at training step ${totalTrainingSteps}`);
+                                //console.log(`[Train] Double-DQN target model updated at training step ${totalTrainingSteps}`);
                             }
                         }
                     }
