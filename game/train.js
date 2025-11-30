@@ -45,6 +45,14 @@ let gameContext = null;
  * Stores transitions (s, a, r, s', done) with O(1) add and sample operations.
  * Uses pre-allocated typed arrays to minimize GC pressure.
  */
+/**
+ * Rank-based prioritized replay buffer constants.
+ * α (alpha) controls how much prioritization is used (0 = uniform, 1 = full prioritization)
+ * β (beta) controls importance-sampling correction (0 = no correction, 1 = full correction)
+ */
+const PRIORITY_ALPHA = 0.7;
+const PRIORITY_BETA = 0.5;
+
 class ReplayBuffer {
     /**
      * @param {number} capacity - Maximum number of transitions to store
@@ -63,8 +71,19 @@ class ReplayBuffer {
         this.nextStates = new Float32Array(capacity * stateSize);
         this.dones = new Uint8Array(capacity);
         
+        // TD errors for prioritized replay (absolute TD error per transition)
+        // Initialize with high priority so new transitions get sampled
+        this.tdErrors = new Float32Array(capacity);
+        for (let i = 0; i < capacity; i++) {
+            this.tdErrors[i] = 1.0; // Default high priority for new transitions
+        }
+        
         // Pre-allocate batch index array for sampling (reused across calls)
         this._batchIndices = new Uint32Array(capacity);
+        
+        // Pre-allocate arrays for sorted indices (used in prioritized sampling)
+        this._sortedIndices = new Uint32Array(capacity);
+        this._sortBuffer = new Float32Array(capacity);
     }
     
     /**
@@ -89,9 +108,35 @@ class ReplayBuffer {
         this.rewards[this.position] = reward;
         this.dones[this.position] = done ? 1 : 0;
         
+        // New transitions get max priority (will be updated after first training)
+        // Find the max TD error in the buffer for initialization
+        let maxError = 1.0;
+        for (let i = 0; i < this._size; i++) {
+            if (this.tdErrors[i] > maxError) {
+                maxError = this.tdErrors[i];
+            }
+        }
+        this.tdErrors[this.position] = maxError;
+        
         this.position = (this.position + 1) % this.capacity;
         if (this._size < this.capacity) {
             this._size++;
+        }
+    }
+    
+    /**
+     * Update TD errors for specific indices after training.
+     * @param {Uint32Array|number[]} indices - Buffer indices to update
+     * @param {Float32Array|number[]} newErrors - New absolute TD errors
+     */
+    updateTDErrors(indices, newErrors) {
+        const len = Math.min(indices.length, newErrors.length);
+        for (let i = 0; i < len; i++) {
+            const idx = indices[i];
+            if (idx < this._size) {
+                // Add small epsilon to prevent zero priority
+                this.tdErrors[idx] = Math.abs(newErrors[i]) + 1e-6;
+            }
         }
     }
     
@@ -104,7 +149,7 @@ class ReplayBuffer {
     }
     
     /**
-     * Sample a random minibatch of transitions.
+     * Sample a random minibatch of transitions (uniform sampling).
      * Returns typed arrays for direct tensor creation.
      * Uses pre-allocated arrays where possible to minimize allocations.
      * 
@@ -156,6 +201,137 @@ class ReplayBuffer {
     }
     
     /**
+     * Sample a minibatch using rank-based prioritized replay.
+     * Transitions with higher TD errors are more likely to be sampled.
+     * Returns importance sampling weights for bias correction.
+     * 
+     * Sampling probability: P(i) = 1 / rank(i)^α where rank is based on TD error
+     * Importance weight: w(i) = (N * P(i))^(-β) / max(w)
+     * 
+     * @param {number} batchSize - Number of transitions to sample
+     * @returns {{states: Float32Array, actions: Uint8Array, rewards: Float32Array, nextStates: Float32Array, dones: Uint8Array, indices: Uint32Array, weights: Float32Array, actualBatchSize: number, meanTDError: number}}
+     */
+    getPrioritizedBatch(batchSize) {
+        const actualBatchSize = Math.min(batchSize, this._size);
+        
+        // Step 1: Create indices and sort by TD error (descending)
+        // Copy TD errors and indices for sorting
+        for (let i = 0; i < this._size; i++) {
+            this._sortedIndices[i] = i;
+            this._sortBuffer[i] = this.tdErrors[i];
+        }
+        
+        // Sort indices by TD error (descending order - highest error first)
+        const indices = Array.from(this._sortedIndices.subarray(0, this._size));
+        const errors = this._sortBuffer;
+        indices.sort((a, b) => errors[b] - errors[a]);
+        
+        // Step 2: Compute rank-based probabilities
+        // P(i) = 1 / rank(i)^α, where rank starts at 1
+        const probabilities = new Float32Array(this._size);
+        let sumProb = 0;
+        for (let rank = 1; rank <= this._size; rank++) {
+            const prob = 1.0 / Math.pow(rank, PRIORITY_ALPHA);
+            probabilities[rank - 1] = prob;
+            sumProb += prob;
+        }
+        
+        // Normalize probabilities
+        for (let i = 0; i < this._size; i++) {
+            probabilities[i] /= sumProb;
+        }
+        
+        // Step 3: Sample according to probabilities
+        const batchStates = new Float32Array(actualBatchSize * this.stateSize);
+        const batchActions = new Uint8Array(actualBatchSize);
+        const batchRewards = new Float32Array(actualBatchSize);
+        const batchNextStates = new Float32Array(actualBatchSize * this.stateSize);
+        const batchDones = new Uint8Array(actualBatchSize);
+        const weights = new Float32Array(actualBatchSize);
+        const sampledIndices = new Uint32Array(actualBatchSize);
+        
+        // Build cumulative distribution for sampling
+        const cumulative = new Float32Array(this._size);
+        cumulative[0] = probabilities[0];
+        for (let i = 1; i < this._size; i++) {
+            cumulative[i] = cumulative[i - 1] + probabilities[i];
+        }
+        
+        // Track TD errors for logging
+        let totalTDError = 0;
+        
+        // Sample using inverse transform sampling
+        for (let i = 0; i < actualBatchSize; i++) {
+            const r = Math.random();
+            
+            // Binary search to find the index
+            let low = 0;
+            let high = this._size - 1;
+            while (low < high) {
+                const mid = Math.floor((low + high) / 2);
+                if (cumulative[mid] < r) {
+                    low = mid + 1;
+                } else {
+                    high = mid;
+                }
+            }
+            
+            // low is now the rank-1 index in the sorted order
+            const rank = low + 1;
+            const bufferIdx = indices[low]; // Get actual buffer index
+            
+            sampledIndices[i] = bufferIdx;
+            this._batchIndices[i] = bufferIdx;
+            
+            const srcOffset = bufferIdx * this.stateSize;
+            const dstOffset = i * this.stateSize;
+            
+            // Copy state data
+            for (let j = 0; j < this.stateSize; j++) {
+                batchStates[dstOffset + j] = this.states[srcOffset + j];
+                batchNextStates[dstOffset + j] = this.nextStates[srcOffset + j];
+            }
+            
+            batchActions[i] = this.actions[bufferIdx];
+            batchRewards[i] = this.rewards[bufferIdx];
+            batchDones[i] = this.dones[bufferIdx];
+            
+            // Compute importance sampling weight
+            // w(i) = (N * P(i))^(-β)
+            const prob = probabilities[low];
+            weights[i] = Math.pow(this._size * prob, -PRIORITY_BETA);
+            totalTDError += this.tdErrors[bufferIdx];
+        }
+        
+        // Normalize weights by max weight for stability
+        let maxWeight = 0;
+        for (let i = 0; i < actualBatchSize; i++) {
+            if (weights[i] > maxWeight) {
+                maxWeight = weights[i];
+            }
+        }
+        if (maxWeight > 0) {
+            for (let i = 0; i < actualBatchSize; i++) {
+                weights[i] /= maxWeight;
+            }
+        }
+        
+        const meanTDError = totalTDError / actualBatchSize;
+        
+        return {
+            states: batchStates,
+            actions: batchActions,
+            rewards: batchRewards,
+            nextStates: batchNextStates,
+            dones: batchDones,
+            indices: sampledIndices,
+            weights: weights,
+            actualBatchSize,
+            meanTDError
+        };
+    }
+    
+    /**
      * Check if buffer has enough samples for a batch.
      * @param {number} batchSize - Desired batch size
      * @returns {boolean}
@@ -170,6 +346,10 @@ class ReplayBuffer {
     clear() {
         this.position = 0;
         this._size = 0;
+        // Reset TD errors
+        for (let i = 0; i < this.capacity; i++) {
+            this.tdErrors[i] = 1.0;
+        }
     }
 }
 
@@ -221,10 +401,103 @@ export function initTraining(context) {
     // Maximum steps per episode to prevent infinite loops
     const MAX_STEPS_PER_EPISODE = 10000;
     
+    // Reward shaping constants
+    const REWARD_MERGE = 10;           // +10 for every fruit merge
+    const REWARD_LARGE_FRUIT = 50;     // +50 for creating large/rare fruit (level >= 5)
+    const REWARD_STEP_PENALTY = -1;    // -1 per step to encourage faster play
+    const REWARD_GAME_OVER = -20;      // -20 on game over
+    const LARGE_FRUIT_THRESHOLD = 5;   // Fruit level 5 or higher is considered "large"
+    
     // Model references
     let model = null;
     let targetModel = null;  // Target network for stable Q-learning
     let optimizer = null;
+    
+    // Track previous score for reward shaping
+    let previousScore = 0;
+    let previousMaxFruitLevel = -1;
+    
+    /**
+     * Compute shaped reward based on game events.
+     * Never returns zero - always applies at least the step penalty.
+     * 
+     * Reward components:
+     * - +10 for every fruit merge (detected via score increase)
+     * - +50 for creating a large/rare fruit (level >= 5)
+     * - -1 step penalty to encourage faster play
+     * - -20 on game over
+     * 
+     * @param {number} scoreDelta - Change in score since last step
+     * @param {number} currentMaxFruit - Current maximum fruit level on board
+     * @param {boolean} isGameOver - Whether the game just ended
+     * @returns {{shapedReward: number, components: {merge: number, largeFruit: number, stepPenalty: number, gameOver: number}}}
+     */
+    function computeShapedReward(scoreDelta, currentMaxFruit, isGameOver) {
+        const components = {
+            merge: 0,
+            largeFruit: 0,
+            stepPenalty: REWARD_STEP_PENALTY, // Always apply step penalty
+            gameOver: 0
+        };
+        
+        // Detect merge: if score increased, a merge occurred
+        if (scoreDelta > 0) {
+            components.merge = REWARD_MERGE;
+        }
+        
+        // Detect large fruit creation: if max fruit level increased to >= threshold
+        if (currentMaxFruit >= LARGE_FRUIT_THRESHOLD && currentMaxFruit > previousMaxFruitLevel) {
+            components.largeFruit = REWARD_LARGE_FRUIT;
+        }
+        
+        // Game over penalty
+        if (isGameOver) {
+            components.gameOver = REWARD_GAME_OVER;
+        }
+        
+        // Update tracking variables
+        previousMaxFruitLevel = currentMaxFruit;
+        
+        // Total shaped reward (never zero - at minimum we have step penalty)
+        const shapedReward = components.merge + components.largeFruit + components.stepPenalty + components.gameOver;
+        
+        return { shapedReward, components };
+    }
+    
+    /**
+     * Reset reward shaping state for a new episode.
+     */
+    function resetRewardShaping() {
+        previousScore = 0;
+        previousMaxFruitLevel = -1;
+    }
+    
+    /**
+     * Get the maximum fruit level currently on the board from state.
+     * State format: [currentX, currentY, currentFruit, nextFruit, booster, ...boardFruits]
+     * Board fruits are at positions 5+, with 3 values each (x, y, level)
+     * 
+     * @param {Float32Array|number[]} state - The state array
+     * @returns {number} Maximum fruit level on board (0-9 normalized to 0-1, need to convert back)
+     */
+    function getMaxFruitLevelFromState(state) {
+        let maxLevel = -1;
+        const MAX_FRUIT_LEVEL = 9; // Watermelon is level 9
+        
+        // Board fruits start at index 5, each has 3 values (x, y, normalizedLevel)
+        for (let i = 5; i + 2 < state.length; i += 3) {
+            const normalizedLevel = state[i + 2];
+            if (normalizedLevel > 0) {
+                // Convert normalized level (0-1) back to actual level (0-9)
+                const level = Math.round(normalizedLevel * MAX_FRUIT_LEVEL);
+                if (level > maxLevel) {
+                    maxLevel = level;
+                }
+            }
+        }
+        
+        return maxLevel;
+    }
     
     // Pre-allocated buffers for state encoding (reused across steps)
     const stateBuffer = new Float32Array(STATE_SIZE);
@@ -404,30 +677,53 @@ export function initTraining(context) {
     }
     
     /**
-     * Train on a minibatch using gradient descent.
-     * Computes Q-targets using the TARGET MODEL and performs a single gradient update.
-     * All tensor operations are wrapped in tf.tidy() where possible.
+     * Train on a minibatch using gradient descent with Double DQN.
+     * Uses ONLINE model for action selection and TARGET model for action evaluation.
+     * All Q-target computations run inside tf.tidy() for proper memory management.
+     * 
+     * Double DQN target calculation:
+     *   a* = argmax_a Q_online(nextState)[a]
+     *   target = reward + gamma * Q_target(nextState)[a*] * (1 - done)
      * 
      * @param {Object} batch - Sampled batch from replay buffer
      * @param {number} gamma - Discount factor for Q-learning
-     * @returns {number} Training loss
+     * @param {boolean} verbose - Whether to log Double-DQN updates
+     * @returns {{loss: number, tdErrors: Float32Array}} Training loss and TD errors for priority update
      */
-    function trainOnBatch(batch, gamma) {
-        const { states, actions, rewards, nextStates, dones, actualBatchSize } = batch;
+    function trainOnBatch(batch, gamma, verbose = false) {
+        const { states, actions, rewards, nextStates, dones, weights, actualBatchSize } = batch;
         
-        // Compute targets outside of gradient tape using TARGET MODEL
-        const targets = tf.tidy(() => {
+        // Track TD errors for prioritized replay
+        const tdErrors = new Float32Array(actualBatchSize);
+        
+        // Compute targets and TD errors using Double DQN inside tf.tidy()
+        const { targets, currentQForActions } = tf.tidy(() => {
             const nextStatesTensor = tf.tensor2d(nextStates, [actualBatchSize, STATE_SIZE]);
-            // Use TARGET MODEL for stable Q-value estimation
-            const nextQValues = targetModel.predict(nextStatesTensor);
-            const maxNextQ = nextQValues.max(1).dataSync();
+            
+            // DOUBLE DQN: Use ONLINE model to select actions
+            const onlineNextQValues = model.predict(nextStatesTensor);
+            const bestActions = onlineNextQValues.argMax(1).dataSync();
+            
+            // DOUBLE DQN: Use TARGET model to evaluate the selected actions
+            const targetNextQValues = targetModel.predict(nextStatesTensor);
+            const targetNextQData = targetNextQValues.arraySync();
+            
+            if (verbose) {
+                console.log('[Train] Double-DQN: Using online model for action selection, target model for evaluation');
+            }
             
             const statesTensor = tf.tensor2d(states, [actualBatchSize, STATE_SIZE]);
             const currentQValues = model.predict(statesTensor);
             const currentQData = currentQValues.arraySync();
             
-            // Compute target Q-values
-            // For each sample: target[action] = reward + gamma * max(Q_target(s', a')) * (1 - done)
+            // Store current Q values for the taken actions (for TD error calculation)
+            const qForActions = new Float32Array(actualBatchSize);
+            for (let i = 0; i < actualBatchSize; i++) {
+                qForActions[i] = currentQData[i][actions[i]];
+            }
+            
+            // Compute target Q-values using Double DQN formula
+            // target = reward + gamma * Q_target(s', argmax_a Q_online(s', a)) * (1 - done)
             for (let i = 0; i < actualBatchSize; i++) {
                 const action = actions[i];
                 const reward = rewards[i];
@@ -436,25 +732,57 @@ export function initTraining(context) {
                 if (done) {
                     currentQData[i][action] = reward;
                 } else {
-                    currentQData[i][action] = reward + gamma * maxNextQ[i];
+                    // Double DQN: use online model's best action to index target model's Q-values
+                    const bestAction = bestActions[i];
+                    const targetQValue = targetNextQData[i][bestAction];
+                    currentQData[i][action] = reward + gamma * targetQValue;
                 }
             }
             
-            return tf.tensor2d(currentQData);
+            return {
+                targets: tf.tensor2d(currentQData),
+                currentQForActions: qForActions
+            };
         });
         
         // Compute gradients and apply using optimizer
         const statesTensor = tf.tensor2d(states, [actualBatchSize, STATE_SIZE]);
         
-        const lossFunction = () => {
-            const predictions = model.predict(statesTensor);
-            return tf.losses.meanSquaredError(targets, predictions);
-        };
+        // If we have importance sampling weights, apply them to the loss
+        let lossFunction;
+        if (weights) {
+            const weightsTensor = tf.tensor1d(weights);
+            lossFunction = () => {
+                const predictions = model.predict(statesTensor);
+                // Compute element-wise squared error
+                const squaredError = tf.squaredDifference(targets, predictions);
+                // Reduce to per-sample loss
+                const perSampleLoss = squaredError.mean(1);
+                // Weight by importance sampling weights
+                const weightedLoss = perSampleLoss.mul(weightsTensor);
+                return weightedLoss.mean();
+            };
+        } else {
+            lossFunction = () => {
+                const predictions = model.predict(statesTensor);
+                return tf.losses.meanSquaredError(targets, predictions);
+            };
+        }
         
         const { value: loss, grads } = tf.variableGrads(lossFunction);
         optimizer.applyGradients(grads);
         
         const lossValue = loss.dataSync()[0];
+        
+        // Compute TD errors for priority update
+        // TD error = |target - Q(s, a)|
+        const targetData = targets.arraySync();
+        for (let i = 0; i < actualBatchSize; i++) {
+            const action = actions[i];
+            const targetValue = targetData[i][action];
+            const currentValue = currentQForActions[i];
+            tdErrors[i] = Math.abs(targetValue - currentValue);
+        }
         
         // Clean up tensors
         targets.dispose();
@@ -462,7 +790,7 @@ export function initTraining(context) {
         loss.dispose();
         Object.values(grads).forEach(g => g.dispose());
         
-        return lossValue;
+        return { loss: lossValue, tdErrors };
     }
     
     /**
@@ -612,6 +940,9 @@ export function initTraining(context) {
                 // Reset environment for new episode
                 window.RL.resetEpisode();
                 
+                // Reset reward shaping state
+                resetRewardShaping();
+                
                 // Get fresh engine reference after reset
                 const engine = gameContext.engine();
                 
@@ -619,12 +950,20 @@ export function initTraining(context) {
                 let totalReward = 0;
                 let totalLoss = 0;
                 let trainCount = 0;
+                let totalMeanTDError = 0; // Track mean TD error for logging
                 const episodeStartTime = performance.now();
                 const episodeStartEpsilon = currentEpsilon;
+                
+                // Track shaped reward components for logging
+                let totalMergeReward = 0;
+                let totalLargeFruitReward = 0;
+                let totalStepPenalty = 0;
+                let totalGameOverPenalty = 0;
                 
                 // Get initial state and encode into buffer
                 const rawState = window.RL.getState();
                 encodeStateIntoBuffer(rawState, stateBuffer);
+                previousScore = gameContext.getScore();
                 
                 // Track when buffer has enough samples for training (optimization to avoid repeated size() calls)
                 let canTrain = replayBuffer.size() >= validMinBufferSize;
@@ -643,17 +982,31 @@ export function initTraining(context) {
                     // Tick cooldown (needed for drop timing)
                     window.RL.tickCooldown();
                     
-                    // Get reward
-                    const reward = window.RL.getReward();
-                    totalReward += reward;
+                    // Get current score and compute shaped reward
+                    const currentScore = gameContext.getScore();
+                    const scoreDelta = currentScore - previousScore;
+                    previousScore = currentScore;
                     
                     // Get next state and check if terminal
                     const rawNextState = window.RL.getState();
                     encodeStateIntoBuffer(rawNextState, nextStateBuffer);
                     const done = window.RL.isTerminal();
                     
-                    // Store transition in replay buffer
-                    replayBuffer.add(stateBuffer, action, reward, nextStateBuffer, done);
+                    // Get max fruit level from state for reward shaping
+                    const currentMaxFruit = getMaxFruitLevelFromState(nextStateBuffer);
+                    
+                    // Compute shaped reward (never zero)
+                    const { shapedReward, components } = computeShapedReward(scoreDelta, currentMaxFruit, done);
+                    totalReward += shapedReward;
+                    
+                    // Track reward components for logging
+                    totalMergeReward += components.merge;
+                    totalLargeFruitReward += components.largeFruit;
+                    totalStepPenalty += components.stepPenalty;
+                    totalGameOverPenalty += components.gameOver;
+                    
+                    // Store transition in replay buffer with shaped reward
+                    replayBuffer.add(stateBuffer, action, shapedReward, nextStateBuffer, done);
                     
                     // Update canTrain flag if we just crossed the threshold
                     if (!canTrain && replayBuffer.size() >= validMinBufferSize) {
@@ -662,9 +1015,15 @@ export function initTraining(context) {
                     
                     // Train on minibatch if enough samples and at training interval
                     if (canTrain && stepCount % validTrainEveryNSteps === 0) {
-                        const batch = replayBuffer.sampleBatch(validBatchSize);
-                        const loss = trainOnBatch(batch, validGamma);
+                        // Use prioritized replay sampling
+                        const batch = replayBuffer.getPrioritizedBatch(validBatchSize);
+                        const { loss, tdErrors } = trainOnBatch(batch, validGamma, verbose && trainCount === 0);
+                        
+                        // Update TD errors for sampled transitions
+                        replayBuffer.updateTDErrors(batch.indices, tdErrors);
+                        
                         totalLoss += loss;
+                        totalMeanTDError += batch.meanTDError;
                         trainCount++;
                         totalTrainingSteps++;
                         
@@ -672,7 +1031,7 @@ export function initTraining(context) {
                         if (totalTrainingSteps % validTargetUpdateEvery === 0) {
                             updateTargetModel();
                             if (verbose) {
-                                console.log(`[Train] Target model updated at training step ${totalTrainingSteps}`);
+                                console.log(`[Train] Double-DQN target model updated at training step ${totalTrainingSteps}`);
                             }
                         }
                     }
@@ -698,6 +1057,7 @@ export function initTraining(context) {
                 
                 const episodeTime = performance.now() - episodeStartTime;
                 const avgLoss = trainCount > 0 ? totalLoss / trainCount : 0;
+                const avgMeanTDError = trainCount > 0 ? totalMeanTDError / trainCount : 0;
                 
                 const episodeResult = {
                     episode: episode + 1,
@@ -706,7 +1066,15 @@ export function initTraining(context) {
                     epsilon: episodeStartEpsilon,
                     avgLoss: avgLoss,
                     trainSteps: trainCount,
-                    durationMs: episodeTime
+                    durationMs: episodeTime,
+                    // Reward shaping components
+                    rewardComponents: {
+                        merge: totalMergeReward,
+                        largeFruit: totalLargeFruitReward,
+                        stepPenalty: totalStepPenalty,
+                        gameOver: totalGameOverPenalty
+                    },
+                    avgMeanTDError: avgMeanTDError
                 };
                 
                 results.push(episodeResult);
@@ -719,6 +1087,14 @@ export function initTraining(context) {
                         `trainSteps=${trainCount}, duration=${episodeTime.toFixed(2)}ms, ` +
                         `nextEpsilon=${currentEpsilon.toFixed(4)}`
                     );
+                    console.log(
+                        `[Train] Reward components: ` +
+                        `merge=${totalMergeReward.toFixed(0)}, largeFruit=${totalLargeFruitReward.toFixed(0)}, ` +
+                        `stepPenalty=${totalStepPenalty.toFixed(0)}, gameOver=${totalGameOverPenalty.toFixed(0)}`
+                    );
+                    if (trainCount > 0) {
+                        console.log(`[Train] Mean TD error: ${avgMeanTDError.toFixed(4)}`);
+                    }
                 }
             }
             
@@ -881,17 +1257,29 @@ export function initTraining(context) {
                 }
                 
                 window.RL.resetEpisode();
+                
+                // Reset reward shaping state
+                resetRewardShaping();
+                
                 const engine = gameContext.engine();
                 
                 let stepCount = 0;
                 let totalReward = 0;
                 let totalLoss = 0;
                 let trainCount = 0;
+                let totalMeanTDError = 0; // Track mean TD error for logging
                 const episodeStartTime = performance.now();
                 const episodeStartEpsilon = currentEpsilon;
                 
+                // Track shaped reward components for logging
+                let totalMergeReward = 0;
+                let totalLargeFruitReward = 0;
+                let totalStepPenalty = 0;
+                let totalGameOverPenalty = 0;
+                
                 const rawState = window.RL.getState();
                 encodeStateIntoBuffer(rawState, stateBuffer);
+                previousScore = gameContext.getScore();
                 
                 // Track when buffer has enough samples for training (optimization to avoid repeated size() calls)
                 let canTrain = replayBuffer.size() >= validMinBufferSize;
@@ -903,14 +1291,31 @@ export function initTraining(context) {
                     stepPhysics(engine);
                     window.RL.tickCooldown();
                     
-                    const reward = window.RL.getReward();
-                    totalReward += reward;
+                    // Get current score and compute shaped reward
+                    const currentScore = gameContext.getScore();
+                    const scoreDelta = currentScore - previousScore;
+                    previousScore = currentScore;
                     
+                    // Get next state and check if terminal
                     const rawNextState = window.RL.getState();
                     encodeStateIntoBuffer(rawNextState, nextStateBuffer);
                     const done = window.RL.isTerminal();
                     
-                    replayBuffer.add(stateBuffer, action, reward, nextStateBuffer, done);
+                    // Get max fruit level from state for reward shaping
+                    const currentMaxFruit = getMaxFruitLevelFromState(nextStateBuffer);
+                    
+                    // Compute shaped reward (never zero)
+                    const { shapedReward, components } = computeShapedReward(scoreDelta, currentMaxFruit, done);
+                    totalReward += shapedReward;
+                    
+                    // Track reward components for logging
+                    totalMergeReward += components.merge;
+                    totalLargeFruitReward += components.largeFruit;
+                    totalStepPenalty += components.stepPenalty;
+                    totalGameOverPenalty += components.gameOver;
+                    
+                    // Store transition with shaped reward
+                    replayBuffer.add(stateBuffer, action, shapedReward, nextStateBuffer, done);
                     
                     // Update canTrain flag if we just crossed the threshold
                     if (!canTrain && replayBuffer.size() >= validMinBufferSize) {
@@ -919,9 +1324,15 @@ export function initTraining(context) {
                     
                     // Train on minibatch if enough samples and at training interval
                     if (canTrain && stepCount % validTrainEveryNSteps === 0) {
-                        const batch = replayBuffer.sampleBatch(validBatchSize);
-                        const loss = trainOnBatch(batch, validGamma);
+                        // Use prioritized replay sampling
+                        const batch = replayBuffer.getPrioritizedBatch(validBatchSize);
+                        const { loss, tdErrors } = trainOnBatch(batch, validGamma, verbose && trainCount === 0);
+                        
+                        // Update TD errors for sampled transitions
+                        replayBuffer.updateTDErrors(batch.indices, tdErrors);
+                        
                         totalLoss += loss;
+                        totalMeanTDError += batch.meanTDError;
                         trainCount++;
                         totalTrainingSteps++;
                         
@@ -929,7 +1340,7 @@ export function initTraining(context) {
                         if (totalTrainingSteps % validTargetUpdateEvery === 0) {
                             updateTargetModel();
                             if (verbose) {
-                                console.log(`[Train] Target model updated at training step ${totalTrainingSteps}`);
+                                console.log(`[Train] Double-DQN target model updated at training step ${totalTrainingSteps}`);
                             }
                         }
                     }
@@ -953,6 +1364,7 @@ export function initTraining(context) {
                 
                 const episodeTime = performance.now() - episodeStartTime;
                 const avgLoss = trainCount > 0 ? totalLoss / trainCount : 0;
+                const avgMeanTDError = trainCount > 0 ? totalMeanTDError / trainCount : 0;
                 
                 results.push({
                     episode: episode + 1,
@@ -961,7 +1373,15 @@ export function initTraining(context) {
                     epsilon: episodeStartEpsilon,
                     avgLoss: avgLoss,
                     trainSteps: trainCount,
-                    durationMs: episodeTime
+                    durationMs: episodeTime,
+                    // Reward shaping components
+                    rewardComponents: {
+                        merge: totalMergeReward,
+                        largeFruit: totalLargeFruitReward,
+                        stepPenalty: totalStepPenalty,
+                        gameOver: totalGameOverPenalty
+                    },
+                    avgMeanTDError: avgMeanTDError
                 });
                 
                 if (verbose) {
@@ -972,6 +1392,14 @@ export function initTraining(context) {
                         `trainSteps=${trainCount}, duration=${episodeTime.toFixed(2)}ms, ` +
                         `nextEpsilon=${currentEpsilon.toFixed(4)}`
                     );
+                    console.log(
+                        `[Train] Reward components: ` +
+                        `merge=${totalMergeReward.toFixed(0)}, largeFruit=${totalLargeFruitReward.toFixed(0)}, ` +
+                        `stepPenalty=${totalStepPenalty.toFixed(0)}, gameOver=${totalGameOverPenalty.toFixed(0)}`
+                    );
+                    if (trainCount > 0) {
+                        console.log(`[Train] Mean TD error: ${avgMeanTDError.toFixed(4)}`);
+                    }
                 }
             }
             
@@ -1121,5 +1549,6 @@ export function initTraining(context) {
     console.log('[Train] Optimized training module initialized.');
     console.log('[Train] Use RL.initModel() to build the model, then await RL.train(numEpisodes) to train.');
     console.log('[Train] Both RL.train() and RL.trainAsync() yield to event loop to prevent browser freeze.');
-    console.log('[Train] New features: target network, epsilon decay, minBufferSize, targetUpdateEvery.');
+    console.log('[Train] Features: Double DQN, rank-based prioritized replay (α=0.7, β=0.5), reward shaping.');
+    console.log('[Train] Reward shaping: +10 merge, +50 large fruit, -1 step penalty, -20 game over.');
 }
