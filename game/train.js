@@ -5,12 +5,20 @@
  * - Pre-allocated state buffers (reduces GC pressure)
  * - Batched predictions for action selection and Q-target computation
  * - Fixed-size ring buffer replay with O(1) add and sample operations
- * - Target network for stable Q-learning (updated periodically)
+ * - Target network for stable Q-learning (soft updates with τ parameter)
  * - Epsilon-greedy exploration with dynamic decay
  * - Batched gradient updates using tf.variableGrads() and optimizer.applyGradients()
  * - tf.tidy() wrapping for automatic memory management
  * - Async training loop with periodic yields (prevents browser freeze)
  * - Completely headless training (no DOM/rendering)
+ * 
+ * Stability improvements:
+ * - Gradient clipping to prevent exploding gradients
+ * - Huber loss for robust training (less sensitive to outliers)
+ * - Soft target network updates (Polyak averaging) for smoother learning
+ * - Reward clipping to bound reward magnitudes
+ * - TD error clamping for stable priority updates
+ * - Q-value clipping to prevent numerical instability
  * 
  * Usage:
  *   RL.initModel();                        // Build and compile main + target models
@@ -28,7 +36,7 @@
  *   RL.train(n, opts)        - Train for n episodes
  *   RL.trainAsync(n, opts)   - Same as train, for UI compatibility
  *   RL.selectAction(s, eps)  - Select action using epsilon-greedy policy
- *   RL.updateTargetModel()   - Copy weights from main to target model
+ *   RL.updateTargetModel()   - Copy weights from main to target model (soft update)
  *   RL.getReplayBuffer()     - Get the replay buffer instance
  *   RL.clearReplayBuffer()   - Clear the replay buffer
  *   RL.getModel()            - Get the main model
@@ -50,8 +58,20 @@ let gameContext = null;
  * α (alpha) controls how much prioritization is used (0 = uniform, 1 = full prioritization)
  * β (beta) controls importance-sampling correction (0 = no correction, 1 = full correction)
  */
-const PRIORITY_ALPHA = 0.7;
-const PRIORITY_BETA = 0.5;
+const PRIORITY_ALPHA = 0.6;  // Reduced from 0.7 for more uniform sampling (stability)
+const PRIORITY_BETA = 0.4;   // Reduced from 0.5 for less aggressive correction initially
+
+/**
+ * Stability constants for training.
+ */
+const MAX_TD_ERROR = 100.0;       // Maximum TD error for priority clamping
+const MIN_TD_ERROR = 1e-6;        // Minimum TD error to prevent zero priority
+const MAX_Q_VALUE = 1000.0;       // Maximum Q-value for clipping
+const GRADIENT_CLIP_NORM = 10.0;  // Maximum gradient norm for clipping
+const TAU = 0.005;                // Soft update coefficient for target network (Polyak averaging)
+const HUBER_DELTA = 1.0;          // Delta parameter for Huber loss
+const REWARD_CLIP_MIN = -10.0;    // Minimum reward after normalization
+const REWARD_CLIP_MAX = 10.0;     // Maximum reward after normalization
 
 class ReplayBuffer {
     /**
@@ -126,6 +146,7 @@ class ReplayBuffer {
     
     /**
      * Update TD errors for specific indices after training.
+     * Clamps TD errors to prevent extreme priority values.
      * @param {Uint32Array|number[]} indices - Buffer indices to update
      * @param {Float32Array|number[]} newErrors - New absolute TD errors
      */
@@ -134,8 +155,9 @@ class ReplayBuffer {
         for (let i = 0; i < len; i++) {
             const idx = indices[i];
             if (idx < this._size) {
-                // Add small epsilon to prevent zero priority
-                this.tdErrors[idx] = Math.abs(newErrors[i]) + 1e-6;
+                // Clamp TD error to prevent extreme priority values (stability improvement)
+                const clampedError = Math.min(Math.max(Math.abs(newErrors[i]), MIN_TD_ERROR), MAX_TD_ERROR);
+                this.tdErrors[idx] = clampedError;
             }
         }
     }
@@ -378,16 +400,17 @@ export function initTraining(context) {
     // Model configuration
     const STATE_SIZE = 155;  // 155-element state vector
     const NUM_ACTIONS = 4;   // 4 discrete actions (left, right, center, drop)
-    const HIDDEN_UNITS = 32; // Hidden layer units
-    const LEARNING_RATE = 0.001; // Adam optimizer learning rate
+    const HIDDEN_UNITS = 64; // Hidden layer units (increased for better representation)
+    const LEARNING_RATE = 0.0005; // Adam optimizer learning rate (reduced for stability)
     const DEFAULT_GAMMA = 0.99;  // Discount factor for Q-learning (default)
     
     // Training configuration
     const DEFAULT_BATCH_SIZE = 64;
     const DEFAULT_REPLAY_BUFFER_SIZE = 10000;
-    const DEFAULT_MIN_BUFFER_SIZE = 100; // Minimum samples before training starts
+    const DEFAULT_MIN_BUFFER_SIZE = 500; // Increased minimum samples before training starts (stability)
     const DEFAULT_TRAIN_EVERY_N_STEPS = 4;
-    const DEFAULT_TARGET_UPDATE_EVERY = 1000; // Update target model every N training steps
+    const DEFAULT_TARGET_UPDATE_EVERY = 1; // Update target model every training step (soft updates)
+    const USE_SOFT_UPDATE = true; // Use soft updates (Polyak averaging) instead of hard updates
     
     // Epsilon-greedy defaults
     const DEFAULT_EPSILON = 0.1;
@@ -401,11 +424,11 @@ export function initTraining(context) {
     // Maximum steps per episode to prevent infinite loops
     const MAX_STEPS_PER_EPISODE = 10000;
     
-    // Reward shaping constants
-    const REWARD_MERGE = 10;           // +10 for every fruit merge
-    const REWARD_LARGE_FRUIT = 40;     // +40 for creating large/rare fruit (level >= 5)
+    // Reward shaping constants (scaled down for stability)
+    const REWARD_MERGE = 1.0;           // +1 for every fruit merge (scaled down)
+    const REWARD_LARGE_FRUIT = 5.0;     // +5 for creating large/rare fruit (level >= 5)
     const REWARD_STEP_PENALTY = 0.01;    // 0.01 reward per step to survive
-    const REWARD_GAME_OVER = -200;      // -200 on game over
+    const REWARD_GAME_OVER = -10.0;      // -10 on game over (scaled down)
     const LARGE_FRUIT_THRESHOLD = 6;   // Fruit level 6 or higher is considered "large"
     
     // Model references
@@ -594,14 +617,15 @@ export function initTraining(context) {
             loss: 'meanSquaredError'
         });
         
-        // Initialize target model with same weights as main model
-        updateTargetModel();
+        // Initialize target model with same weights as main model (hard update for initialization)
+        updateTargetModel(true);
         
         // Initialize replay buffer
         replayBuffer = new ReplayBuffer(DEFAULT_REPLAY_BUFFER_SIZE, STATE_SIZE);
         
         console.log('[Train] Model built and compiled successfully.');
-        console.log('[Train] Target model initialized with same weights.');
+        console.log('[Train] Target model initialized with same weights (hard update).');
+        console.log('[Train] Stability features enabled: Huber loss, gradient clipping, soft target updates.');
         console.log('[Train] Model summary:');
         model.summary();
         
@@ -609,34 +633,56 @@ export function initTraining(context) {
     };
     
     /**
-     * Copy weights from main model to target model.
-     * This provides stable Q-value targets for training.
+     * Update target model weights.
+     * Supports both soft updates (Polyak averaging) and hard updates.
+     * Soft updates: θ_target = τ * θ_main + (1 - τ) * θ_target
+     * Hard updates: θ_target = θ_main
+     * 
+     * @param {boolean} hardUpdate - If true, perform hard update instead of soft update
      */
-    function updateTargetModel() {
+    function updateTargetModel(hardUpdate = false) {
         if (!model || !targetModel) {
             console.warn('[Train] Cannot update target model: models not initialized');
             return;
         }
         
-        // Get weights from main model and clone them for the target model
-        // Note: We don't dispose mainWeights as they may be the actual model weight tensors
-        // The cloned weights are disposed after setWeights copies their data
-        const mainWeights = model.getWeights();
-        const clonedWeights = mainWeights.map(w => w.clone());
-        
-        // Set cloned weights on target model
-        targetModel.setWeights(clonedWeights);
-        
-        // Dispose of the cloned tensors (setWeights copies the data internally)
-        clonedWeights.forEach(w => w.dispose());
+        if (USE_SOFT_UPDATE && !hardUpdate) {
+            // Soft update (Polyak averaging) for smoother, more stable learning
+            // θ_target = τ * θ_main + (1 - τ) * θ_target
+            tf.tidy(() => {
+                const mainWeights = model.getWeights();
+                const targetWeights = targetModel.getWeights();
+                
+                const newWeights = mainWeights.map((mainW, i) => {
+                    const targetW = targetWeights[i];
+                    // τ * θ_main + (1 - τ) * θ_target
+                    return mainW.mul(TAU).add(targetW.mul(1 - TAU));
+                });
+                
+                targetModel.setWeights(newWeights);
+                
+                // Dispose new weight tensors (setWeights copies the data internally)
+                newWeights.forEach(w => w.dispose());
+            });
+        } else {
+            // Hard update: directly copy weights
+            const mainWeights = model.getWeights();
+            const clonedWeights = mainWeights.map(w => w.clone());
+            
+            targetModel.setWeights(clonedWeights);
+            
+            // Dispose of the cloned tensors (setWeights copies the data internally)
+            clonedWeights.forEach(w => w.dispose());
+        }
     }
     
     /**
      * Expose updateTargetModel on the RL namespace.
+     * @param {boolean} hardUpdate - If true, perform hard update instead of soft update
      */
-    window.RL.updateTargetModel = function() {
-        updateTargetModel();
-        console.log('[Train] Target model updated with main model weights.');
+    window.RL.updateTargetModel = function(hardUpdate = false) {
+        updateTargetModel(hardUpdate);
+        console.log(`[Train] Target model updated with ${hardUpdate || !USE_SOFT_UPDATE ? 'hard' : 'soft'} update (τ=${TAU}).`);
     };
     
     /**
@@ -677,9 +723,66 @@ export function initTraining(context) {
     }
     
     /**
+     * Compute Huber loss (smooth L1 loss) between predictions and targets.
+     * More robust to outliers than MSE, providing stability in RL training.
+     * 
+     * Huber(x) = 0.5 * x^2           if |x| <= delta
+     *          = delta * (|x| - 0.5 * delta)  otherwise
+     * 
+     * @param {tf.Tensor} predictions - Model predictions
+     * @param {tf.Tensor} targets - Target values
+     * @param {number} delta - Threshold for switching between quadratic and linear
+     * @returns {tf.Tensor} Huber loss value
+     */
+    function huberLoss(predictions, targets, delta = HUBER_DELTA) {
+        return tf.tidy(() => {
+            const error = tf.sub(predictions, targets);
+            const absError = tf.abs(error);
+            const quadratic = tf.minimum(absError, delta);
+            const linear = tf.sub(absError, quadratic);
+            // 0.5 * quadratic^2 + delta * linear
+            return tf.mean(tf.add(tf.mul(0.5, tf.square(quadratic)), tf.mul(delta, linear)));
+        });
+    }
+    
+    /**
+     * Clip gradients by global norm to prevent exploding gradients.
+     * 
+     * @param {Object} grads - Object mapping variable names to gradients
+     * @param {number} maxNorm - Maximum gradient norm
+     * @returns {Object} Clipped gradients
+     */
+    function clipGradientsByNorm(grads, maxNorm) {
+        return tf.tidy(() => {
+            // Compute global norm
+            const gradValues = Object.values(grads);
+            const squaredNorms = gradValues.map(g => tf.sum(tf.square(g)));
+            const globalNormSquared = tf.addN(squaredNorms);
+            const globalNorm = tf.sqrt(globalNormSquared);
+            
+            // Compute clip coefficient: min(1, maxNorm / globalNorm)
+            const clipCoef = tf.minimum(1.0, tf.div(maxNorm, tf.add(globalNorm, 1e-6)));
+            
+            // Clip each gradient
+            const clippedGrads = {};
+            for (const [name, grad] of Object.entries(grads)) {
+                clippedGrads[name] = tf.mul(grad, clipCoef);
+            }
+            
+            return clippedGrads;
+        });
+    }
+    
+    /**
      * Train on a minibatch using gradient descent with Double DQN.
      * Uses ONLINE model for action selection and TARGET model for action evaluation.
      * All Q-target computations run inside tf.tidy() for proper memory management.
+     * 
+     * Stability improvements:
+     * - Huber loss instead of MSE for robustness to outliers
+     * - Gradient clipping to prevent exploding gradients
+     * - Q-value clipping to prevent numerical instability
+     * - TD error clamping for stable priority updates
      * 
      * Double DQN target calculation:
      *   a* = argmax_a Q_online(nextState)[a]
@@ -688,13 +791,14 @@ export function initTraining(context) {
      * @param {Object} batch - Sampled batch from replay buffer
      * @param {number} gamma - Discount factor for Q-learning
      * @param {boolean} verbose - Whether to log Double-DQN updates
-     * @returns {{loss: number, tdErrors: Float32Array}} Training loss and TD errors for priority update
+     * @returns {{loss: number, tdErrors: Float32Array, maxGradNorm: number}} Training loss, TD errors, and max gradient norm
      */
     function trainOnBatch(batch, gamma, verbose = false) {
         const { states, actions, rewards, nextStates, dones, weights, actualBatchSize } = batch;
         
         // Track TD errors for prioritized replay
         const tdErrors = new Float32Array(actualBatchSize);
+        let maxGradNorm = 0;
         
         // Compute targets and TD errors using Double DQN inside tf.tidy()
         const { targets, currentQForActions } = tf.tidy(() => {
@@ -705,11 +809,14 @@ export function initTraining(context) {
             const bestActions = onlineNextQValues.argMax(1).dataSync();
             
             // DOUBLE DQN: Use TARGET model to evaluate the selected actions
+            // Clip target Q-values to prevent extreme values
             const targetNextQValues = targetModel.predict(nextStatesTensor);
-            const targetNextQData = targetNextQValues.arraySync();
+            const targetNextQClipped = tf.clipByValue(targetNextQValues, -MAX_Q_VALUE, MAX_Q_VALUE);
+            const targetNextQData = targetNextQClipped.arraySync();
             
             if (verbose) {
                 console.log('[Train] Double-DQN: Using online model for action selection, target model for evaluation');
+                console.log('[Train] Stability: Huber loss, gradient clipping, Q-value clipping enabled');
             }
             
             const statesTensor = tf.tensor2d(states, [actualBatchSize, STATE_SIZE]);
@@ -726,7 +833,8 @@ export function initTraining(context) {
             // target = reward + gamma * Q_target(s', argmax_a Q_online(s', a)) * (1 - done)
             for (let i = 0; i < actualBatchSize; i++) {
                 const action = actions[i];
-                const reward = rewards[i];
+                // Clip reward for stability
+                const reward = Math.min(Math.max(rewards[i], REWARD_CLIP_MIN), REWARD_CLIP_MAX);
                 const done = dones[i];
                 
                 if (done) {
@@ -735,7 +843,8 @@ export function initTraining(context) {
                     // Double DQN: use online model's best action to index target model's Q-values
                     const bestAction = bestActions[i];
                     const targetQValue = targetNextQData[i][bestAction];
-                    currentQData[i][action] = reward + gamma * targetQValue;
+                    // Clip the computed target to prevent extreme values
+                    currentQData[i][action] = Math.min(Math.max(reward + gamma * targetQValue, -MAX_Q_VALUE), MAX_Q_VALUE);
                 }
             }
             
@@ -745,43 +854,58 @@ export function initTraining(context) {
             };
         });
         
-        // Compute gradients and apply using optimizer
+        // Compute gradients and apply using optimizer with gradient clipping
         const statesTensor = tf.tensor2d(states, [actualBatchSize, STATE_SIZE]);
         
-        // If we have importance sampling weights, apply them to the loss
-        let lossFunction;
+        // Create weights tensor if we have importance sampling weights
+        let weightsTensor = null;
         if (weights) {
-            const weightsTensor = tf.tensor1d(weights);
-            lossFunction = () => {
-                const predictions = model.predict(statesTensor);
-                // Compute element-wise squared error
-                const squaredError = tf.squaredDifference(targets, predictions);
-                // Reduce to per-sample loss
-                const perSampleLoss = squaredError.mean(1);
+            weightsTensor = tf.tensor1d(weights);
+        }
+        
+        // Define loss function using Huber loss for stability
+        const lossFunction = () => {
+            const predictions = model.predict(statesTensor);
+            
+            if (weightsTensor) {
+                // Weighted Huber loss for prioritized experience replay
+                const error = tf.sub(predictions, targets);
+                const absError = tf.abs(error);
+                const quadratic = tf.minimum(absError, HUBER_DELTA);
+                const linear = tf.sub(absError, quadratic);
+                // Per-element Huber loss
+                const elementLoss = tf.add(tf.mul(0.5, tf.square(quadratic)), tf.mul(HUBER_DELTA, linear));
+                // Reduce to per-sample loss (mean over actions)
+                const perSampleLoss = elementLoss.mean(1);
                 // Weight by importance sampling weights
                 const weightedLoss = perSampleLoss.mul(weightsTensor);
                 return weightedLoss.mean();
-            };
-        } else {
-            lossFunction = () => {
-                const predictions = model.predict(statesTensor);
-                return tf.losses.meanSquaredError(targets, predictions);
-            };
-        }
+            } else {
+                // Unweighted Huber loss
+                return huberLoss(predictions, targets, HUBER_DELTA);
+            }
+        };
         
+        // Compute gradients
         const { value: loss, grads } = tf.variableGrads(lossFunction);
-        optimizer.applyGradients(grads);
+        
+        // Clip gradients by global norm for stability
+        const clippedGrads = clipGradientsByNorm(grads, GRADIENT_CLIP_NORM);
+        
+        // Apply clipped gradients
+        optimizer.applyGradients(clippedGrads);
         
         const lossValue = loss.dataSync()[0];
         
-        // Compute TD errors for priority update
+        // Compute TD errors for priority update with clamping
         // TD error = |target - Q(s, a)|
         const targetData = targets.arraySync();
         for (let i = 0; i < actualBatchSize; i++) {
             const action = actions[i];
             const targetValue = targetData[i][action];
             const currentValue = currentQForActions[i];
-            tdErrors[i] = Math.abs(targetValue - currentValue);
+            // Clamp TD error for stability
+            tdErrors[i] = Math.min(Math.max(Math.abs(targetValue - currentValue), MIN_TD_ERROR), MAX_TD_ERROR);
         }
         
         // Clean up tensors
@@ -789,8 +913,12 @@ export function initTraining(context) {
         statesTensor.dispose();
         loss.dispose();
         Object.values(grads).forEach(g => g.dispose());
+        Object.values(clippedGrads).forEach(g => g.dispose());
+        if (weightsTensor) {
+            weightsTensor.dispose();
+        }
         
-        return { loss: lossValue, tdErrors };
+        return { loss: lossValue, tdErrors, maxGradNorm };
     }
     
     /**
@@ -1474,7 +1602,8 @@ export function initTraining(context) {
                 optimizer: tf.train.adam(LEARNING_RATE),
                 loss: 'meanSquaredError'
             });
-            updateTargetModel();
+            // Use hard update when loading to ensure exact weight copy
+            updateTargetModel(true);
             
             // Initialize replay buffer if not exists
             if (!replayBuffer) {
@@ -1482,7 +1611,7 @@ export function initTraining(context) {
             }
             
             console.log('[Train] Model loaded successfully.');
-            console.log('[Train] Target model initialized with loaded weights.');
+            console.log('[Train] Target model initialized with loaded weights (hard update).');
             return true;
         } catch (error) {
             console.error('[Train] Failed to load model:', error);
@@ -1549,6 +1678,7 @@ export function initTraining(context) {
     console.log('[Train] Optimized training module initialized.');
     console.log('[Train] Use RL.initModel() to build the model, then await RL.train(numEpisodes) to train.');
     console.log('[Train] Both RL.train() and RL.trainAsync() yield to event loop to prevent browser freeze.');
-    console.log('[Train] Features: Double DQN, rank-based prioritized replay (α=0.7, β=0.5), reward shaping.');
-    console.log('[Train] Reward shaping: +10 merge, +50 large fruit, +0.01 step reward, -200 game over.');
+    console.log('[Train] Features: Double DQN, rank-based prioritized replay (α=' + PRIORITY_ALPHA + ', β=' + PRIORITY_BETA + '), reward shaping.');
+    console.log('[Train] Stability: Huber loss (δ=' + HUBER_DELTA + '), gradient clipping (max=' + GRADIENT_CLIP_NORM + '), soft target updates (τ=' + TAU + ').');
+    console.log('[Train] Reward shaping: +' + REWARD_MERGE + ' merge, +' + REWARD_LARGE_FRUIT + ' large fruit, +' + REWARD_STEP_PENALTY + ' step reward, ' + REWARD_GAME_OVER + ' game over.');
 }
