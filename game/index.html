@@ -481,6 +481,14 @@
                 <button id="restart-menu-button" class="hidden px-6 py-3 bg-orange-500 text-white font-bold rounded-lg shadow-lg text-xl hover:bg-orange-400 transition-all">
                     Restart
                 </button>
+                <button id="rl-controls-button" class="px-6 py-3 bg-purple-500 text-white font-bold rounded-lg shadow-lg text-xl hover:bg-purple-400 transition-all flex items-center justify-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 2a10 10 0 1 0 10 10H12V2z"></path>
+                        <path d="M12 12 2.83 5.17"></path>
+                        <path d="m12 12 7.17 7.17"></path>
+                    </svg>
+                    <span>RL Controls</span>
+                </button>
                 <div class="flex gap-3">
                     <button id="music-toggle" class="flex-1 px-4 py-3 bg-blue-500 text-white font-bold rounded-lg shadow-lg text-lg hover:bg-blue-400 transition-all flex items-center justify-center gap-2">
                         <span>Music:</span>
@@ -504,6 +512,43 @@
                 </button>
                 <button id="restart-confirm-no" class="px-6 py-3 bg-gray-500 text-white font-bold rounded-lg shadow-lg text-xl hover:bg-gray-400 transition-all">
                     Cancel
+                </button>
+            </div>
+        </div>
+
+        <!-- RL Controls Modal -->
+        <div id="rl-controls-modal" class="hidden absolute inset-0 bg-white/70 text-gray-900 backdrop-blur-md z-40 flex flex-col justify-center items-center text-center p-8">
+            <h2 class="text-3xl font-bold text-purple-600 mb-4">RL Controls</h2>
+            <p class="text-lg text-gray-700 max-w-md mb-6 leading-relaxed">
+                Train and test reinforcement learning agents for the game.
+            </p>
+            <div id="rl-status" class="text-sm text-gray-600 mb-4 h-6">
+                Model not initialized
+            </div>
+            <div class="flex flex-col gap-3 w-full max-w-xs">
+                <button id="rl-start-training" class="px-6 py-3 bg-purple-500 text-white font-bold rounded-lg shadow-lg text-xl hover:bg-purple-400 transition-all flex items-center justify-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                    </svg>
+                    <span>Start Training</span>
+                </button>
+                <div class="flex gap-3">
+                    <button id="rl-save-model" class="flex-1 px-4 py-3 bg-blue-500 text-white font-bold rounded-lg shadow-lg text-lg hover:bg-blue-400 transition-all">
+                        Save Model
+                    </button>
+                    <button id="rl-load-model" class="flex-1 px-4 py-3 bg-blue-500 text-white font-bold rounded-lg shadow-lg text-lg hover:bg-blue-400 transition-all">
+                        Load Model
+                    </button>
+                </div>
+                <button id="rl-play-realtime" class="px-6 py-3 bg-green-500 text-white font-bold rounded-lg shadow-lg text-xl hover:bg-green-400 transition-all flex items-center justify-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <polygon points="10 8 16 12 10 16 10 8"></polygon>
+                    </svg>
+                    <span>Play Real-time</span>
+                </button>
+                <button id="rl-back-button" class="px-6 py-3 bg-gray-500 text-white font-bold rounded-lg shadow-lg text-xl hover:bg-gray-400 transition-all">
+                    Back
                 </button>
             </div>
         </div>
@@ -561,6 +606,16 @@
             const fruitEvolutionRow = document.getElementById('fruit-evolution-row');
             const boosterIndicator = document.getElementById('booster-indicator');
             const boosterTooltip = document.getElementById('booster-tooltip');
+            
+            // RL Controls Modal elements
+            const rlControlsButton = document.getElementById('rl-controls-button');
+            const rlControlsModal = document.getElementById('rl-controls-modal');
+            const rlStartTraining = document.getElementById('rl-start-training');
+            const rlSaveModel = document.getElementById('rl-save-model');
+            const rlLoadModel = document.getElementById('rl-load-model');
+            const rlPlayRealtime = document.getElementById('rl-play-realtime');
+            const rlBackButton = document.getElementById('rl-back-button');
+            const rlStatus = document.getElementById('rl-status');
 
             // --- Matter.js modules ---
             const { Engine, Render, Runner, World, Bodies, Body, Events, Composite, Common } = Matter;
@@ -2340,13 +2395,22 @@
                 musicToggle.addEventListener('click', toggleMusic);
                 soundsToggle.addEventListener('click', toggleSounds);
                 boosterIndicator.addEventListener('click', toggleBoosterTooltip);
+                
+                // RL Controls event listeners
+                rlControlsButton.addEventListener('click', openRLControls);
+                rlBackButton.addEventListener('click', closeRLControls);
+                rlStartTraining.addEventListener('click', handleStartTraining);
+                rlSaveModel.addEventListener('click', handleSaveModel);
+                rlLoadModel.addEventListener('click', handleLoadModel);
+                rlPlayRealtime.addEventListener('click', handlePlayRealtime);
             }
             
             // --- Helper to check if any modal is visible ---
             function isModalVisible() {
                 return !pauseModal.classList.contains('hidden') || 
                        !gameOverModal.classList.contains('hidden') || 
-                       !restartConfirmModal.classList.contains('hidden');
+                       !restartConfirmModal.classList.contains('hidden') ||
+                       !rlControlsModal.classList.contains('hidden');
             }
             
             // --- Event Handlers (to allow removal) ---
@@ -2488,6 +2552,195 @@
                 restartConfirmModal.classList.add('hidden');
             }
             
+            // --- RL Controls ---
+            let isRLTraining = false;
+            let isRLPlaying = false;
+            let rlPlayInterval = null;
+            
+            function updateRLStatus(message) {
+                if (rlStatus) {
+                    rlStatus.textContent = message;
+                }
+            }
+            
+            function openRLControls() {
+                pauseModal.classList.add('hidden');
+                rlControlsModal.classList.remove('hidden');
+                
+                // Update status based on model state
+                if (typeof window.RL !== 'undefined' && window.RL.getModel && window.RL.getModel()) {
+                    updateRLStatus('Model initialized and ready');
+                } else {
+                    updateRLStatus('Model not initialized');
+                }
+            }
+            
+            function closeRLControls() {
+                rlControlsModal.classList.add('hidden');
+                pauseModal.classList.remove('hidden');
+            }
+            
+            async function handleStartTraining() {
+                if (isRLTraining) {
+                    updateRLStatus('Training already in progress...');
+                    return;
+                }
+                
+                try {
+                    isRLTraining = true;
+                    
+                    // Update button text to show training status
+                    const btnSpan = rlStartTraining.querySelector('span');
+                    const originalText = btnSpan.textContent;
+                    btnSpan.textContent = 'Training...';
+                    rlStartTraining.disabled = true;
+                    rlStartTraining.classList.add('opacity-50', 'cursor-not-allowed');
+                    
+                    // Initialize model if not already done
+                    if (typeof window.RL !== 'undefined') {
+                        if (!window.RL.getModel || !window.RL.getModel()) {
+                            updateRLStatus('Initializing model...');
+                            window.RL.initModel();
+                        }
+                        
+                        updateRLStatus('Training in progress (5 episodes)...');
+                        
+                        // Close the modal to show the game during training
+                        rlControlsModal.classList.add('hidden');
+                        
+                        // Run training
+                        const result = await window.RL.train(5, {
+                            verbose: true,
+                            epsilonStart: 1.0,
+                            epsilonEnd: 0.1,
+                            epsilonDecay: 0.9
+                        });
+                        
+                        // Show the modal again after training
+                        rlControlsModal.classList.remove('hidden');
+                        
+                        if (result) {
+                            updateRLStatus(`Training complete! Avg reward: ${result.avgReward.toFixed(2)}`);
+                        } else {
+                            updateRLStatus('Training completed');
+                        }
+                    } else {
+                        updateRLStatus('RL module not available');
+                    }
+                } catch (error) {
+                    console.error('Training error:', error);
+                    updateRLStatus('Training failed: ' + error.message);
+                    rlControlsModal.classList.remove('hidden');
+                } finally {
+                    isRLTraining = false;
+                    const btnSpan = rlStartTraining.querySelector('span');
+                    btnSpan.textContent = 'Start Training';
+                    rlStartTraining.disabled = false;
+                    rlStartTraining.classList.remove('opacity-50', 'cursor-not-allowed');
+                }
+            }
+            
+            async function handleSaveModel() {
+                try {
+                    if (typeof window.RL !== 'undefined' && window.RL.getModel && window.RL.getModel()) {
+                        updateRLStatus('Saving model...');
+                        const model = window.RL.getModel();
+                        await model.save('localstorage://fruit-merge-dqn-v1');
+                        updateRLStatus('Model saved to localStorage');
+                    } else {
+                        updateRLStatus('No model to save. Train first!');
+                    }
+                } catch (error) {
+                    console.error('Save error:', error);
+                    updateRLStatus('Save failed: ' + error.message);
+                }
+            }
+            
+            async function handleLoadModel() {
+                try {
+                    if (typeof window.RL !== 'undefined' && window.RL.loadModel) {
+                        updateRLStatus('Loading model...');
+                        const success = await window.RL.loadModel();
+                        if (success) {
+                            updateRLStatus('Model loaded successfully');
+                        } else {
+                            updateRLStatus('No saved model found');
+                        }
+                    } else {
+                        updateRLStatus('RL module not available');
+                    }
+                } catch (error) {
+                    console.error('Load error:', error);
+                    updateRLStatus('Load failed: ' + error.message);
+                }
+            }
+            
+            function handlePlayRealtime() {
+                if (isRLPlaying) {
+                    // Stop playing
+                    stopRLPlay();
+                    return;
+                }
+                
+                // Check if model is available
+                if (typeof window.RL === 'undefined' || !window.RL.getModel || !window.RL.getModel()) {
+                    updateRLStatus('No model loaded. Load or train first!');
+                    return;
+                }
+                
+                isRLPlaying = true;
+                
+                // Update button text
+                const btnSpan = rlPlayRealtime.querySelector('span');
+                btnSpan.textContent = 'Stop Playing';
+                rlPlayRealtime.classList.remove('bg-green-500', 'hover:bg-green-400');
+                rlPlayRealtime.classList.add('bg-red-500', 'hover:bg-red-400');
+                
+                // Close the modal to show the game
+                rlControlsModal.classList.add('hidden');
+                
+                // Ensure the pause modal is also hidden
+                pauseModal.classList.add('hidden');
+                
+                updateRLStatus('AI is playing...');
+                
+                // Start the AI playing loop
+                rlPlayInterval = setInterval(() => {
+                    if (!isRLPlaying || isGameOver) {
+                        stopRLPlay();
+                        return;
+                    }
+                    
+                    // Get current state and select action
+                    if (typeof window.RL !== 'undefined' && window.RL.getState && window.RL.selectAction) {
+                        const state = window.RL.getState();
+                        const action = window.RL.selectAction(state, 0.05); // Small epsilon for some exploration
+                        
+                        // Execute the action
+                        if (window.RL.step) {
+                            window.RL.step(action);
+                        }
+                    }
+                }, 100); // 10 actions per second
+            }
+            
+            function stopRLPlay() {
+                isRLPlaying = false;
+                
+                if (rlPlayInterval) {
+                    clearInterval(rlPlayInterval);
+                    rlPlayInterval = null;
+                }
+                
+                // Reset button text
+                const btnSpan = rlPlayRealtime.querySelector('span');
+                btnSpan.textContent = 'Play Real-time';
+                rlPlayRealtime.classList.remove('bg-red-500', 'hover:bg-red-400');
+                rlPlayRealtime.classList.add('bg-green-500', 'hover:bg-green-400');
+                
+                updateRLStatus('AI stopped playing');
+            }
+            
             // --- Handle Share ---
             function handleShare() {
                 const gameUrl = 'https://miklbg.github.io/merge_game/';
@@ -2599,6 +2852,20 @@
                 resumeButton.removeEventListener('click', togglePauseMenu);
                 musicToggle.removeEventListener('click', toggleMusic);
                 soundsToggle.removeEventListener('click', toggleSounds);
+                
+                // RL Controls event listeners removal
+                rlControlsButton.removeEventListener('click', openRLControls);
+                rlBackButton.removeEventListener('click', closeRLControls);
+                rlStartTraining.removeEventListener('click', handleStartTraining);
+                rlSaveModel.removeEventListener('click', handleSaveModel);
+                rlLoadModel.removeEventListener('click', handleLoadModel);
+                rlPlayRealtime.removeEventListener('click', handlePlayRealtime);
+                
+                // Stop RL play if active
+                if (isRLPlaying) {
+                    stopRLPlay();
+                }
+                
                 Events.off(engine);
                 Events.off(render);
                 World.clear(world, false);
