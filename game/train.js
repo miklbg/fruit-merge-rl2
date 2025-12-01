@@ -68,7 +68,7 @@ const MAX_TD_ERROR = 100.0;       // Maximum TD error for priority clamping
 const MIN_TD_ERROR = 1e-6;        // Minimum TD error to prevent zero priority
 const MAX_Q_VALUE = 1000.0;       // Maximum Q-value for clipping
 const GRADIENT_CLIP_NORM = 10.0;  // Maximum gradient norm for clipping
-const TAU = 0.005;                // Soft update coefficient for target network (Polyak averaging)
+const TAU = 0.001;                // Soft update coefficient for target network (Polyak averaging)
 const HUBER_DELTA = 1.0;          // Delta parameter for Huber loss
 const REWARD_CLIP_MIN = -10.0;    // Minimum reward after normalization
 const REWARD_CLIP_MAX = 10.0;     // Maximum reward after normalization
@@ -406,7 +406,7 @@ export function initTraining(context) {
     
     // Training configuration
     const DEFAULT_BATCH_SIZE = 64;
-    const DEFAULT_REPLAY_BUFFER_SIZE = 10000;
+    const DEFAULT_REPLAY_BUFFER_SIZE = 100000;
     const DEFAULT_MIN_BUFFER_SIZE = 500; // Increased minimum samples before training starts (stability)
     const DEFAULT_TRAIN_EVERY_N_STEPS = 4;
     const DEFAULT_TARGET_UPDATE_EVERY = 1; // Update target model every training step (soft updates)
@@ -416,7 +416,7 @@ export function initTraining(context) {
     const DEFAULT_EPSILON = 0.1;
     const DEFAULT_EPSILON_START = 1.0;
     const DEFAULT_EPSILON_END = 0.01;
-    const DEFAULT_EPSILON_DECAY = 0.995;
+    const DEFAULT_EPSILON_DECAY = 0.98;
     
     // Physics timestep (60 FPS equivalent)
     const DELTA_TIME = 1000 / 60;
