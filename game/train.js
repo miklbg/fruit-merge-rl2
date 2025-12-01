@@ -428,7 +428,7 @@ export function initTraining(context) {
     const REWARD_MERGE = 1.0;           // +1 for every fruit merge (scaled down)
     const REWARD_LARGE_FRUIT = 5.0;     // +5 for creating large/rare fruit (level >= 5)
     const REWARD_STEP_PENALTY = -0.01;  // -0.01 penalty per step to encourage faster play
-    const REWARD_FRUIT_DROP = 1.0;      // +1 for each fruit dropped
+    const REWARD_FRUIT_DROP = 0.1;      // +1 for each fruit dropped
     const REWARD_GAME_OVER = -10.0;     // -10 on game over (scaled down)
     const LARGE_FRUIT_THRESHOLD = 6;    // Fruit level 6 or higher is considered "large"
     
