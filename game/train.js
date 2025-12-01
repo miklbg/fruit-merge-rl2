@@ -68,7 +68,7 @@ const MAX_TD_ERROR = 100.0;       // Maximum TD error for priority clamping
 const MIN_TD_ERROR = 1e-6;        // Minimum TD error to prevent zero priority
 const MAX_Q_VALUE = 1000.0;       // Maximum Q-value for clipping
 const GRADIENT_CLIP_NORM = 10.0;  // Maximum gradient norm for clipping
-const TAU = 0.001;                // Soft update coefficient for target network (Polyak averaging)
+const TAU = 0.005;                // Soft update coefficient for target network (Polyak averaging)
 const HUBER_DELTA = 1.0;          // Delta parameter for Huber loss
 const REWARD_CLIP_MIN = -10.0;    // Minimum reward after normalization
 const REWARD_CLIP_MAX = 10.0;     // Maximum reward after normalization
@@ -400,12 +400,16 @@ export function initTraining(context) {
     // Model configuration
     const STATE_SIZE = 155;  // 155-element state vector
     const NUM_ACTIONS = 4;   // 4 discrete actions (left, right, center, drop)
-    const HIDDEN_UNITS = 64; // Hidden layer units (increased for better representation)
-    const LEARNING_RATE = 0.0005; // Adam optimizer learning rate (reduced for stability)
+    const HIDDEN_UNITS_1 = 256; // First hidden layer units
+    const HIDDEN_UNITS_2 = 256; // Second hidden layer units
+    const HIDDEN_UNITS_3 = 128; // Third hidden layer units
+    const LEARNING_RATE_INITIAL = 0.0001; // Initial Adam optimizer learning rate (1e-4)
+    const LEARNING_RATE_100 = 0.00005; // Learning rate after 100 episodes (5e-5)
+    const LEARNING_RATE_200 = 0.00003; // Learning rate after 200 episodes (3e-5)
     const DEFAULT_GAMMA = 0.99;  // Discount factor for Q-learning (default)
     
     // Training configuration
-    const DEFAULT_BATCH_SIZE = 64;
+    const DEFAULT_BATCH_SIZE = 128;
     const DEFAULT_REPLAY_BUFFER_SIZE = 100000;
     const DEFAULT_MIN_BUFFER_SIZE = 500; // Increased minimum samples before training starts (stability)
     const DEFAULT_TRAIN_EVERY_N_STEPS = 4;
@@ -424,18 +428,19 @@ export function initTraining(context) {
     // Maximum steps per episode to prevent infinite loops
     const MAX_STEPS_PER_EPISODE = 10000;
     
-    // Reward shaping constants (scaled down for stability)
-    const REWARD_MERGE = 1.0;           // +1 for every fruit merge (scaled down)
-    const REWARD_LARGE_FRUIT = 5.0;     // +5 for creating large/rare fruit (level >= 5)
-    const REWARD_STEP_PENALTY = -0.01;  // -0.01 penalty per step to encourage faster play
-    const REWARD_FRUIT_DROP = 0.1;      // +1 for each fruit dropped
-    const REWARD_GAME_OVER = -10.0;     // -10 on game over (scaled down)
+    // Reward shaping constants (normalized - divided by 10 for stability)
+    const REWARD_MERGE = 0.1;           // +0.1 for every fruit merge (normalized)
+    const REWARD_LARGE_FRUIT = 0.5;     // +0.5 for creating large/rare fruit (level >= 5)
+    const REWARD_STEP_PENALTY = -0.001; // -0.001 penalty per step to encourage faster play
+    const REWARD_FRUIT_DROP = 0.01;     // +0.01 for each fruit dropped
+    const REWARD_GAME_OVER = -1.0;      // -1 on game over (normalized)
     const LARGE_FRUIT_THRESHOLD = 6;    // Fruit level 6 or higher is considered "large"
     
     // Model references
     let model = null;
     let targetModel = null;  // Target network for stable Q-learning
     let optimizer = null;
+    let episodeCount = 0; // Track total episodes for learning rate decay
     
     // Track previous score for reward shaping
     let previousScore = 0;
@@ -561,8 +566,9 @@ export function initTraining(context) {
      * 
      * Architecture:
      * - Input: 155-element state vector
-     * - Dense: 32 units, ReLU
-     * - Dense: 32 units, ReLU
+     * - Dense: 256 units, ReLU
+     * - Dense: 256 units, ReLU
+     * - Dense: 128 units, ReLU
      * - Output: 4 units (Q-values for each action)
      * 
      * @returns {tf.LayersModel} The created model
@@ -572,7 +578,7 @@ export function initTraining(context) {
         
         // First hidden layer with input shape
         network.add(tf.layers.dense({
-            units: HIDDEN_UNITS,
+            units: HIDDEN_UNITS_1,
             activation: 'relu',
             inputShape: [STATE_SIZE],
             kernelInitializer: 'heNormal'
@@ -580,7 +586,14 @@ export function initTraining(context) {
         
         // Second hidden layer
         network.add(tf.layers.dense({
-            units: HIDDEN_UNITS,
+            units: HIDDEN_UNITS_2,
+            activation: 'relu',
+            kernelInitializer: 'heNormal'
+        }));
+        
+        // Third hidden layer
+        network.add(tf.layers.dense({
+            units: HIDDEN_UNITS_3,
             activation: 'relu',
             kernelInitializer: 'heNormal'
         }));
@@ -599,7 +612,7 @@ export function initTraining(context) {
      * Build and compile the Q-network model.
      * Also creates the target network with the same architecture.
      * 
-     * Optimizer: Adam(0.001)
+     * Optimizer: Adam with learning rate decay schedule
      * Loss: Mean Squared Error (MSE)
      */
     window.RL.initModel = function() {
@@ -608,8 +621,11 @@ export function initTraining(context) {
         // Create main model
         model = createQNetwork();
         
-        // Create optimizer for gradient updates
-        optimizer = tf.train.adam(LEARNING_RATE);
+        // Create optimizer for gradient updates with initial learning rate
+        optimizer = tf.train.adam(LEARNING_RATE_INITIAL);
+        
+        // Reset episode count
+        episodeCount = 0;
         
         // Compile main model
         model.compile({
@@ -622,7 +638,7 @@ export function initTraining(context) {
         
         // Compile target model (not used for training, but needed for predict)
         targetModel.compile({
-            optimizer: tf.train.adam(LEARNING_RATE),
+            optimizer: tf.train.adam(LEARNING_RATE_INITIAL),
             loss: 'meanSquaredError'
         });
         
@@ -633,8 +649,10 @@ export function initTraining(context) {
         replayBuffer = new ReplayBuffer(DEFAULT_REPLAY_BUFFER_SIZE, STATE_SIZE);
         
         console.log('[Train] Model built and compiled successfully.');
+        console.log('[Train] Architecture: 256-256-128 hidden layers, batch size: ' + DEFAULT_BATCH_SIZE);
+        console.log('[Train] Learning rate decay: ' + LEARNING_RATE_INITIAL + ' → ' + LEARNING_RATE_100 + ' (100 eps) → ' + LEARNING_RATE_200 + ' (200 eps)');
         console.log('[Train] Target model initialized with same weights (hard update).');
-        console.log('[Train] Stability features enabled: Huber loss, gradient clipping, soft target updates.');
+        console.log('[Train] Stability features enabled: Huber loss, gradient clipping, soft target updates (τ=' + TAU + ').');
         console.log('[Train] Model summary:');
         model.summary();
         
@@ -930,6 +948,30 @@ export function initTraining(context) {
     }
     
     /**
+     * Update the optimizer learning rate based on episode count.
+     * Implements stepped learning rate decay:
+     * - Episodes 0-99: 1e-4 (LEARNING_RATE_INITIAL)
+     * - Episodes 100-199: 5e-5 (LEARNING_RATE_100)
+     * - Episodes 200+: 3e-5 (LEARNING_RATE_200)
+     */
+    function updateLearningRate() {
+        let newLearningRate;
+        if (episodeCount >= 200) {
+            newLearningRate = LEARNING_RATE_200;
+        } else if (episodeCount >= 100) {
+            newLearningRate = LEARNING_RATE_100;
+        } else {
+            newLearningRate = LEARNING_RATE_INITIAL;
+        }
+        
+        // Update optimizer learning rate
+        if (optimizer && optimizer.learningRate !== newLearningRate) {
+            optimizer.learningRate = newLearningRate;
+            console.log(`[Train] Learning rate updated to ${newLearningRate} at episode ${episodeCount}`);
+        }
+    }
+    
+    /**
      * Run a single physics step without rendering.
      * 
      * @param {Object} engine - Matter.js engine
@@ -945,7 +987,7 @@ export function initTraining(context) {
      * @param {number} numEpisodes - Number of episodes to train
      * @param {Object} [options={}] - Optional configuration options
      * @param {number} [options.gamma=0.99] - Discount factor for Q-learning
-     * @param {number} [options.batchSize=64] - Minibatch size for training
+     * @param {number} [options.batchSize=128] - Minibatch size for training
      * @param {number} [options.trainEveryNSteps=4] - Train every N steps
      * @param {number} [options.minBufferSize=100] - Minimum buffer size before training starts
      * @param {number} [options.epsilon=0.1] - Fixed epsilon for exploration (ignored if epsilonStart is provided)
@@ -1073,6 +1115,9 @@ export function initTraining(context) {
                     //console.log(`[Train] Episode ${episode + 1}/${numEpisodes} starting...`);
                 }
                 
+                // Update learning rate based on episode count
+                updateLearningRate();
+                
                 // Reset environment for new episode
                 window.RL.resetEpisode();
                 
@@ -1193,6 +1238,9 @@ export function initTraining(context) {
                 if (useDynamicEpsilon && replayBuffer.size() >= validMinBufferSize) {
                     currentEpsilon = Math.max(validEpsilonEnd, currentEpsilon * validEpsilonDecay);
                 }
+                
+                // Increment episode count for learning rate decay
+                episodeCount++;
                 
                 const episodeTime = performance.now() - episodeStartTime;
                 const avgLoss = trainCount > 0 ? totalLoss / trainCount : 0;
@@ -1396,6 +1444,9 @@ export function initTraining(context) {
                     console.log(`[Train] Episode ${episode + 1}/${numEpisodes} starting...`);
                 }
                 
+                // Update learning rate based on episode count
+                updateLearningRate();
+                
                 window.RL.resetEpisode();
                 
                 // Reset reward shaping state
@@ -1505,6 +1556,9 @@ export function initTraining(context) {
                     currentEpsilon = Math.max(validEpsilonEnd, currentEpsilon * validEpsilonDecay);
                 }
                 
+                // Increment episode count for learning rate decay
+                episodeCount++;
+                
                 const episodeTime = performance.now() - episodeStartTime;
                 const avgLoss = trainCount > 0 ? totalLoss / trainCount : 0;
                 const avgMeanTDError = trainCount > 0 ? totalMeanTDError / trainCount : 0;
@@ -1603,8 +1657,11 @@ export function initTraining(context) {
             console.log('[Train] Loading model from localStorage...');
             model = await tf.loadLayersModel('localstorage://fruit-merge-dqn-v1');
             
-            // Create optimizer for gradient updates
-            optimizer = tf.train.adam(LEARNING_RATE);
+            // Create optimizer for gradient updates with initial learning rate
+            optimizer = tf.train.adam(LEARNING_RATE_INITIAL);
+            
+            // Reset episode count when loading a model
+            episodeCount = 0;
             
             // Recompile the model
             model.compile({
@@ -1615,7 +1672,7 @@ export function initTraining(context) {
             // Create and initialize target model
             targetModel = createQNetwork();
             targetModel.compile({
-                optimizer: tf.train.adam(LEARNING_RATE),
+                optimizer: tf.train.adam(LEARNING_RATE_INITIAL),
                 loss: 'meanSquaredError'
             });
             // Use hard update when loading to ensure exact weight copy
@@ -1694,7 +1751,9 @@ export function initTraining(context) {
     console.log('[Train] Optimized training module initialized.');
     console.log('[Train] Use RL.initModel() to build the model, then await RL.train(numEpisodes) to train.');
     console.log('[Train] Both RL.train() and RL.trainAsync() yield to event loop to prevent browser freeze.');
+    console.log('[Train] Model architecture: 256-256-128 hidden layers with 4 output units.');
+    console.log('[Train] Batch size: ' + DEFAULT_BATCH_SIZE + ', Learning rate decay: 1e-4 → 5e-5 (100 eps) → 3e-5 (200 eps).');
     console.log('[Train] Features: Double DQN, rank-based prioritized replay (α=' + PRIORITY_ALPHA + ', β=' + PRIORITY_BETA + '), reward shaping.');
     console.log('[Train] Stability: Huber loss (δ=' + HUBER_DELTA + '), gradient clipping (max=' + GRADIENT_CLIP_NORM + '), soft target updates (τ=' + TAU + ').');
-    console.log('[Train] Reward shaping: +' + REWARD_MERGE + ' merge, +' + REWARD_LARGE_FRUIT + ' large fruit, +' + REWARD_FRUIT_DROP + ' fruit drop, ' + REWARD_STEP_PENALTY + ' step penalty, ' + REWARD_GAME_OVER + ' game over.');
+    console.log('[Train] Reward shaping (normalized): +' + REWARD_MERGE + ' merge, +' + REWARD_LARGE_FRUIT + ' large fruit, +' + REWARD_FRUIT_DROP + ' fruit drop, ' + REWARD_STEP_PENALTY + ' step penalty, ' + REWARD_GAME_OVER + ' game over.');
 }
