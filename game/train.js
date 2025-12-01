@@ -463,7 +463,7 @@ export function initTraining(context) {
             merge: 0,
             largeFruit: 0,
             fruitDrop: 0,
-            stepPenalty: REWARD_STEP_PENALTY, // Always apply step penalty
+            stepPenalty: REWARD_STEP_PENALTY, // Always apply step penalty (negative value)
             gameOver: 0
         };
         
@@ -490,7 +490,7 @@ export function initTraining(context) {
         // Update tracking variables
         previousMaxFruitLevel = currentMaxFruit;
         
-        // Total shaped reward (never zero - at minimum we have step penalty)
+        // Total shaped reward - at minimum we have the negative step penalty
         const shapedReward = components.merge + components.largeFruit + components.fruitDrop + components.stepPenalty + components.gameOver;
         
         return { shapedReward, components };
