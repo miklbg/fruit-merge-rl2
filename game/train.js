@@ -16,6 +16,12 @@
  * - Gradient clipping to prevent exploding gradients
  * - Huber loss for robust training (less sensitive to outliers)
  * - Soft target network updates (Polyak averaging) for smoother learning
+ * - Reward normalization with running statistics for variance reduction
+ * - Beta annealing for prioritized replay (gradual increase in importance sampling correction)
+ * - Reduced learning rate schedule (5e-5 → 3e-5 → 1e-5) for more stable convergence
+ * - Slower epsilon decay (0.995 vs 0.98) for better exploration
+ * - Higher minimum buffer size (2000 vs 500) for diverse initial experiences
+ * - Less frequent target network updates (every 4 steps vs every step) for stability
  * - Reward clipping to bound reward magnitudes
  * - TD error clamping for stable priority updates
  * - Q-value clipping to prevent numerical instability
@@ -27,7 +33,7 @@
  *   await RL.train(5, { epsilon: 0.1 });   // Use 10% fixed exploration
  *   await RL.train(5, {                    // Use dynamic epsilon decay
  *     epsilonStart: 1.0,
- *     epsilonEnd: 0.01,
+ *     epsilonEnd: 0.05,
  *     epsilonDecay: 0.995
  *   });
  * 
