@@ -16,7 +16,7 @@
  * - Gradient clipping to prevent exploding gradients
  * - Huber loss for robust training (less sensitive to outliers)
  * - Soft target network updates (Polyak averaging) for smoother learning
- * - Reward normalization with running statistics for variance reduction
+ * - Reward statistics tracking for monitoring training progress
  * - Beta annealing for prioritized replay (gradual increase in importance sampling correction)
  * - Reduced learning rate schedule (5e-5 → 3e-5 → 1e-5) for more stable convergence
  * - Slower epsilon decay (0.995 vs 0.98) for better exploration
@@ -77,8 +77,10 @@ const REWARD_NORM_EPSILON = 1e-8; // Small constant to prevent division by zero
 const REWARD_NORM_CLIP = 10.0;    // Clip normalized rewards to [-10, 10]
 
 /**
- * Running statistics tracker for reward normalization.
+ * Reward statistics tracker for monitoring training.
  * Tracks mean and variance using Welford's online algorithm.
+ * Statistics are collected for monitoring purposes but rewards are not normalized
+ * before storage to maintain consistency in the replay buffer.
  */
 class RewardNormalizer {
     constructor() {
@@ -100,7 +102,8 @@ class RewardNormalizer {
         this.m2 += delta * delta2;
         
         if (this.count > 1) {
-            this.variance = this.m2 / (this.count - 1);
+            // Protect against numerical instability (variance should never be negative)
+            this.variance = Math.max(0, this.m2 / (this.count - 1));
         }
     }
     
@@ -614,7 +617,7 @@ export function initTraining(context) {
     // Replay buffer instance
     let replayBuffer = null;
     
-    // Reward normalizer for stable training
+    // Reward statistics tracker for monitoring
     let rewardNormalizer = null;
     
     /**
@@ -723,7 +726,7 @@ export function initTraining(context) {
         // Initialize replay buffer
         replayBuffer = new ReplayBuffer(DEFAULT_REPLAY_BUFFER_SIZE, STATE_SIZE);
         
-        // Initialize reward normalizer
+        // Initialize reward statistics tracker
         rewardNormalizer = new RewardNormalizer();
         
         console.log('[Train] Model built and compiled successfully.');
@@ -1167,7 +1170,7 @@ export function initTraining(context) {
             console.log(`[Train] Epsilon: ${useDynamicEpsilon ? `dynamic (${currentEpsilon} -> ${validEpsilonEnd}, decay=${validEpsilonDecay})` : `fixed (${currentEpsilon})`}`);
             console.log(`[Train] minBufferSize=${validMinBufferSize}, targetUpdateEvery=${validTargetUpdateEvery}`);
             console.log(`[Train] Prioritized replay beta annealing: ${PRIORITY_BETA_START} -> ${PRIORITY_BETA_END} over ${PRIORITY_BETA_EPISODES} episodes`);
-            console.log(`[Train] Reward normalization enabled with running statistics`);
+            console.log(`[Train] Reward statistics tracking enabled for monitoring`);
         }
         const startTime = performance.now();
         
@@ -1525,7 +1528,7 @@ export function initTraining(context) {
             console.log(`[Train] Epsilon: ${useDynamicEpsilon ? `dynamic (${currentEpsilon} -> ${validEpsilonEnd}, decay=${validEpsilonDecay})` : `fixed (${currentEpsilon})`}`);
             console.log(`[Train] minBufferSize=${validMinBufferSize}, targetUpdateEvery=${validTargetUpdateEvery}`);
             console.log(`[Train] Prioritized replay beta annealing: ${PRIORITY_BETA_START} -> ${PRIORITY_BETA_END} over ${PRIORITY_BETA_EPISODES} episodes`);
-            console.log(`[Train] Reward normalization enabled with running statistics`);
+            console.log(`[Train] Reward statistics tracking enabled for monitoring`);
         }
         const startTime = performance.now();
         
@@ -1806,7 +1809,7 @@ export function initTraining(context) {
                 replayBuffer = new ReplayBuffer(DEFAULT_REPLAY_BUFFER_SIZE, STATE_SIZE);
             }
             
-            // Initialize reward normalizer if not exists
+            // Initialize reward statistics tracker if not exists
             if (!rewardNormalizer) {
                 rewardNormalizer = new RewardNormalizer();
             }
@@ -1881,7 +1884,7 @@ export function initTraining(context) {
     console.log('[Train] Both RL.train() and RL.trainAsync() yield to event loop to prevent browser freeze.');
     console.log('[Train] Model architecture: 256-256-128 hidden layers with 4 output units.');
     console.log('[Train] Batch size: ' + DEFAULT_BATCH_SIZE + ', Learning rate decay: 5e-5 → 3e-5 (100 eps) → 1e-5 (200 eps).');
-    console.log('[Train] Features: Double DQN, rank-based prioritized replay (α=' + PRIORITY_ALPHA + ', β annealed ' + PRIORITY_BETA_START + '→' + PRIORITY_BETA_END + '), reward normalization.');
+    console.log('[Train] Features: Double DQN, rank-based prioritized replay (α=' + PRIORITY_ALPHA + ', β annealed ' + PRIORITY_BETA_START + '→' + PRIORITY_BETA_END + '), reward statistics tracking.');
     console.log('[Train] Stability: Huber loss (δ=' + HUBER_DELTA + '), gradient clipping (max=' + GRADIENT_CLIP_NORM + '), soft target updates (τ=' + TAU + ', every ' + DEFAULT_TARGET_UPDATE_EVERY + ' steps).');
     console.log('[Train] Reward shaping (normalized): +' + REWARD_MERGE + ' merge, +' + REWARD_LARGE_FRUIT + ' large fruit, +' + REWARD_FRUIT_DROP + ' fruit drop, ' + REWARD_STEP_PENALTY + ' step penalty, ' + REWARD_GAME_OVER + ' game over.');
 }
