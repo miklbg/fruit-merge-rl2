@@ -427,9 +427,10 @@ export function initTraining(context) {
     // Reward shaping constants (scaled down for stability)
     const REWARD_MERGE = 1.0;           // +1 for every fruit merge (scaled down)
     const REWARD_LARGE_FRUIT = 5.0;     // +5 for creating large/rare fruit (level >= 5)
-    const REWARD_STEP_PENALTY = 0.01;    // 0.01 reward per step to survive
-    const REWARD_GAME_OVER = -10.0;      // -10 on game over (scaled down)
-    const LARGE_FRUIT_THRESHOLD = 6;   // Fruit level 6 or higher is considered "large"
+    const REWARD_STEP_PENALTY = -0.01;  // -0.01 penalty per step to encourage faster play
+    const REWARD_FRUIT_DROP = 1.0;      // +1 for each fruit dropped
+    const REWARD_GAME_OVER = -10.0;     // -10 on game over (scaled down)
+    const LARGE_FRUIT_THRESHOLD = 6;    // Fruit level 6 or higher is considered "large"
     
     // Model references
     let model = null;
@@ -445,20 +446,23 @@ export function initTraining(context) {
      * Never returns zero - always applies at least the step penalty.
      * 
      * Reward components:
-     * - +10 for every fruit merge (detected via score increase)
-     * - +50 for creating a large/rare fruit (level >= 5)
-     * - -1 step penalty to encourage faster play
-     * - -20 on game over
+     * - +1 for every fruit merge (detected via score increase)
+     * - +5 for creating a large/rare fruit (level >= 5)
+     * - +1 for each fruit dropped
+     * - -0.01 step penalty to encourage faster play
+     * - -10 on game over
      * 
      * @param {number} scoreDelta - Change in score since last step
      * @param {number} currentMaxFruit - Current maximum fruit level on board
      * @param {boolean} isGameOver - Whether the game just ended
-     * @returns {{shapedReward: number, components: {merge: number, largeFruit: number, stepPenalty: number, gameOver: number}}}
+     * @param {boolean} wasDrop - Whether the action was a fruit drop (action 3)
+     * @returns {{shapedReward: number, components: {merge: number, largeFruit: number, fruitDrop: number, stepPenalty: number, gameOver: number}}}
      */
-    function computeShapedReward(scoreDelta, currentMaxFruit, isGameOver) {
+    function computeShapedReward(scoreDelta, currentMaxFruit, isGameOver, wasDrop) {
         const components = {
             merge: 0,
             largeFruit: 0,
+            fruitDrop: 0,
             stepPenalty: REWARD_STEP_PENALTY, // Always apply step penalty
             gameOver: 0
         };
@@ -473,6 +477,11 @@ export function initTraining(context) {
             components.largeFruit = REWARD_LARGE_FRUIT;
         }
         
+        // Fruit drop reward: +1 for each fruit dropped
+        if (wasDrop) {
+            components.fruitDrop = REWARD_FRUIT_DROP;
+        }
+        
         // Game over penalty
         if (isGameOver) {
             components.gameOver = REWARD_GAME_OVER;
@@ -482,7 +491,7 @@ export function initTraining(context) {
         previousMaxFruitLevel = currentMaxFruit;
         
         // Total shaped reward (never zero - at minimum we have step penalty)
-        const shapedReward = components.merge + components.largeFruit + components.stepPenalty + components.gameOver;
+        const shapedReward = components.merge + components.largeFruit + components.fruitDrop + components.stepPenalty + components.gameOver;
         
         return { shapedReward, components };
     }
@@ -1084,6 +1093,7 @@ export function initTraining(context) {
                 // Track shaped reward components for logging
                 let totalMergeReward = 0;
                 let totalLargeFruitReward = 0;
+                let totalFruitDropReward = 0;
                 let totalStepPenalty = 0;
                 let totalGameOverPenalty = 0;
                 
@@ -1122,13 +1132,15 @@ export function initTraining(context) {
                     // Get max fruit level from state for reward shaping
                     const currentMaxFruit = getMaxFruitLevelFromState(nextStateBuffer);
                     
-                    // Compute shaped reward (never zero)
-                    const { shapedReward, components } = computeShapedReward(scoreDelta, currentMaxFruit, done);
+                    // Compute shaped reward (never zero) - action 3 is drop
+                    const wasDrop = action === 3;
+                    const { shapedReward, components } = computeShapedReward(scoreDelta, currentMaxFruit, done, wasDrop);
                     totalReward += shapedReward;
                     
                     // Track reward components for logging
                     totalMergeReward += components.merge;
                     totalLargeFruitReward += components.largeFruit;
+                    totalFruitDropReward += components.fruitDrop;
                     totalStepPenalty += components.stepPenalty;
                     totalGameOverPenalty += components.gameOver;
                     
@@ -1198,6 +1210,7 @@ export function initTraining(context) {
                     rewardComponents: {
                         merge: totalMergeReward,
                         largeFruit: totalLargeFruitReward,
+                        fruitDrop: totalFruitDropReward,
                         stepPenalty: totalStepPenalty,
                         gameOver: totalGameOverPenalty
                     },
@@ -1217,7 +1230,7 @@ export function initTraining(context) {
                     console.log(
                         `[Train] Reward components: ` +
                         `merge=${totalMergeReward.toFixed(0)}, largeFruit=${totalLargeFruitReward.toFixed(0)}, ` +
-                        `stepPenalty=${totalStepPenalty.toFixed(0)}, gameOver=${totalGameOverPenalty.toFixed(0)}`
+                        `fruitDrop=${totalFruitDropReward.toFixed(0)}, stepPenalty=${totalStepPenalty.toFixed(2)}, gameOver=${totalGameOverPenalty.toFixed(0)}`
                     );
                     if (trainCount > 0) {
                         console.log(`[Train] Mean TD error: ${avgMeanTDError.toFixed(4)}`);
@@ -1401,6 +1414,7 @@ export function initTraining(context) {
                 // Track shaped reward components for logging
                 let totalMergeReward = 0;
                 let totalLargeFruitReward = 0;
+                let totalFruitDropReward = 0;
                 let totalStepPenalty = 0;
                 let totalGameOverPenalty = 0;
                 
@@ -1431,13 +1445,15 @@ export function initTraining(context) {
                     // Get max fruit level from state for reward shaping
                     const currentMaxFruit = getMaxFruitLevelFromState(nextStateBuffer);
                     
-                    // Compute shaped reward (never zero)
-                    const { shapedReward, components } = computeShapedReward(scoreDelta, currentMaxFruit, done);
+                    // Compute shaped reward (never zero) - action 3 is drop
+                    const wasDrop = action === 3;
+                    const { shapedReward, components } = computeShapedReward(scoreDelta, currentMaxFruit, done, wasDrop);
                     totalReward += shapedReward;
                     
                     // Track reward components for logging
                     totalMergeReward += components.merge;
                     totalLargeFruitReward += components.largeFruit;
+                    totalFruitDropReward += components.fruitDrop;
                     totalStepPenalty += components.stepPenalty;
                     totalGameOverPenalty += components.gameOver;
                     
@@ -1505,6 +1521,7 @@ export function initTraining(context) {
                     rewardComponents: {
                         merge: totalMergeReward,
                         largeFruit: totalLargeFruitReward,
+                        fruitDrop: totalFruitDropReward,
                         stepPenalty: totalStepPenalty,
                         gameOver: totalGameOverPenalty
                     },
@@ -1522,7 +1539,7 @@ export function initTraining(context) {
                     console.log(
                         `[Train] Reward components: ` +
                         `merge=${totalMergeReward.toFixed(0)}, largeFruit=${totalLargeFruitReward.toFixed(0)}, ` +
-                        `stepPenalty=${totalStepPenalty.toFixed(0)}, gameOver=${totalGameOverPenalty.toFixed(0)}`
+                        `fruitDrop=${totalFruitDropReward.toFixed(0)}, stepPenalty=${totalStepPenalty.toFixed(2)}, gameOver=${totalGameOverPenalty.toFixed(0)}`
                     );
                     if (trainCount > 0) {
                         console.log(`[Train] Mean TD error: ${avgMeanTDError.toFixed(4)}`);
@@ -1679,5 +1696,5 @@ export function initTraining(context) {
     console.log('[Train] Both RL.train() and RL.trainAsync() yield to event loop to prevent browser freeze.');
     console.log('[Train] Features: Double DQN, rank-based prioritized replay (α=' + PRIORITY_ALPHA + ', β=' + PRIORITY_BETA + '), reward shaping.');
     console.log('[Train] Stability: Huber loss (δ=' + HUBER_DELTA + '), gradient clipping (max=' + GRADIENT_CLIP_NORM + '), soft target updates (τ=' + TAU + ').');
-    console.log('[Train] Reward shaping: +' + REWARD_MERGE + ' merge, +' + REWARD_LARGE_FRUIT + ' large fruit, +' + REWARD_STEP_PENALTY + ' step reward, ' + REWARD_GAME_OVER + ' game over.');
+    console.log('[Train] Reward shaping: +' + REWARD_MERGE + ' merge, +' + REWARD_LARGE_FRUIT + ' large fruit, +' + REWARD_FRUIT_DROP + ' fruit drop, ' + REWARD_STEP_PENALTY + ' step penalty, ' + REWARD_GAME_OVER + ' game over.');
 }
