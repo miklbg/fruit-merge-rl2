@@ -964,9 +964,19 @@ export function initTraining(context) {
             newLearningRate = LEARNING_RATE_INITIAL;
         }
         
-        // Update optimizer learning rate
-        if (optimizer && optimizer.learningRate !== newLearningRate) {
-            optimizer.learningRate = newLearningRate;
+        // Create new optimizer with updated learning rate if needed
+        // TensorFlow.js optimizers have read-only learning rate, so we need to create a new instance
+        const currentLearningRate = optimizer.learningRate;
+        if (optimizer && currentLearningRate !== newLearningRate) {
+            // Dispose old optimizer
+            optimizer.dispose();
+            // Create new optimizer with new learning rate
+            optimizer = tf.train.adam(newLearningRate);
+            // Recompile model with new optimizer
+            model.compile({
+                optimizer: optimizer,
+                loss: 'meanSquaredError'
+            });
             console.log(`[Train] Learning rate updated to ${newLearningRate} at episode ${episodeCount}`);
         }
     }
@@ -1661,6 +1671,8 @@ export function initTraining(context) {
             optimizer = tf.train.adam(LEARNING_RATE_INITIAL);
             
             // Reset episode count when loading a model
+            // This restarts the learning rate decay schedule from the beginning.
+            // If continuing training from a saved model, the decay will start fresh.
             episodeCount = 0;
             
             // Recompile the model
