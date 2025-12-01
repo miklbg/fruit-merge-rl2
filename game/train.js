@@ -957,6 +957,11 @@ export function initTraining(context) {
      * - Episodes 200+: 3e-5 (LEARNING_RATE_200)
      */
     function updateLearningRate() {
+        // Early return if model or optimizer not initialized
+        if (!model || !optimizer) {
+            return;
+        }
+        
         let newLearningRate;
         if (episodeCount >= 200) {
             newLearningRate = LEARNING_RATE_200;
@@ -968,7 +973,7 @@ export function initTraining(context) {
         
         // Create new optimizer with updated learning rate if needed
         // TensorFlow.js optimizers have read-only learning rate, so we need to create a new instance
-        if (optimizer && currentLearningRate !== newLearningRate) {
+        if (currentLearningRate !== newLearningRate) {
             // Dispose old optimizer
             optimizer.dispose();
             // Create new optimizer with new learning rate
