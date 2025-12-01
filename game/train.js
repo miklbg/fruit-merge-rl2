@@ -59,7 +59,70 @@ let gameContext = null;
  * β (beta) controls importance-sampling correction (0 = no correction, 1 = full correction)
  */
 const PRIORITY_ALPHA = 0.6;  // Reduced from 0.7 for more uniform sampling (stability)
-const PRIORITY_BETA = 0.4;   // Reduced from 0.5 for less aggressive correction initially
+const PRIORITY_BETA_START = 0.4;   // Starting beta for importance sampling (was constant 0.4)
+const PRIORITY_BETA_END = 1.0;     // Final beta - full correction for later training
+const PRIORITY_BETA_EPISODES = 200; // Number of episodes to anneal beta from start to end
+
+/**
+ * Reward normalization constants.
+ * Using running mean and std to normalize rewards for stable training.
+ */
+const REWARD_NORM_EPSILON = 1e-8; // Small constant to prevent division by zero
+const REWARD_NORM_CLIP = 10.0;    // Clip normalized rewards to [-10, 10]
+
+/**
+ * Running statistics tracker for reward normalization.
+ * Tracks mean and variance using Welford's online algorithm.
+ */
+class RewardNormalizer {
+    constructor() {
+        this.mean = 0;
+        this.variance = 1;
+        this.count = 0;
+        this.m2 = 0; // Sum of squared differences from mean
+    }
+    
+    /**
+     * Update statistics with a new reward value.
+     * @param {number} reward - New reward value
+     */
+    update(reward) {
+        this.count += 1;
+        const delta = reward - this.mean;
+        this.mean += delta / this.count;
+        const delta2 = reward - this.mean;
+        this.m2 += delta * delta2;
+        
+        if (this.count > 1) {
+            this.variance = this.m2 / (this.count - 1);
+        }
+    }
+    
+    /**
+     * Normalize a reward value using current statistics.
+     * @param {number} reward - Reward to normalize
+     * @returns {number} Normalized reward
+     */
+    normalize(reward) {
+        if (this.count < 2) {
+            return reward; // Not enough data for normalization
+        }
+        const std = Math.sqrt(this.variance);
+        const normalized = (reward - this.mean) / (std + REWARD_NORM_EPSILON);
+        // Clip to prevent extreme values
+        return Math.max(-REWARD_NORM_CLIP, Math.min(REWARD_NORM_CLIP, normalized));
+    }
+    
+    /**
+     * Reset statistics.
+     */
+    reset() {
+        this.mean = 0;
+        this.variance = 1;
+        this.count = 0;
+        this.m2 = 0;
+    }
+}
 
 /**
  * Stability constants for training.
@@ -231,9 +294,10 @@ class ReplayBuffer {
      * Importance weight: w(i) = (N * P(i))^(-β) / max(w)
      * 
      * @param {number} batchSize - Number of transitions to sample
+     * @param {number} beta - Importance sampling exponent (0 = no correction, 1 = full correction)
      * @returns {{states: Float32Array, actions: Uint8Array, rewards: Float32Array, nextStates: Float32Array, dones: Uint8Array, indices: Uint32Array, weights: Float32Array, actualBatchSize: number, meanTDError: number}}
      */
-    getPrioritizedBatch(batchSize) {
+    getPrioritizedBatch(batchSize, beta = 0.4) {
         const actualBatchSize = Math.min(batchSize, this._size);
         
         // Step 1: Create indices and sort by TD error (descending)
@@ -321,7 +385,7 @@ class ReplayBuffer {
             // Compute importance sampling weight
             // w(i) = (N * P(i))^(-β)
             const prob = probabilities[low];
-            weights[i] = Math.pow(this._size * prob, -PRIORITY_BETA);
+            weights[i] = Math.pow(this._size * prob, -beta);
             totalTDError += this.tdErrors[bufferIdx];
         }
         
@@ -403,24 +467,24 @@ export function initTraining(context) {
     const HIDDEN_UNITS_1 = 256; // First hidden layer units
     const HIDDEN_UNITS_2 = 256; // Second hidden layer units
     const HIDDEN_UNITS_3 = 128; // Third hidden layer units
-    const LEARNING_RATE_INITIAL = 0.0001; // Initial Adam optimizer learning rate (1e-4)
-    const LEARNING_RATE_100 = 0.00005; // Learning rate after 100 episodes (5e-5)
-    const LEARNING_RATE_200 = 0.00003; // Learning rate after 200 episodes (3e-5)
+    const LEARNING_RATE_INITIAL = 0.00005; // Initial Adam optimizer learning rate (5e-5) - reduced for stability
+    const LEARNING_RATE_100 = 0.00003; // Learning rate after 100 episodes (3e-5)
+    const LEARNING_RATE_200 = 0.00001; // Learning rate after 200 episodes (1e-5)
     const DEFAULT_GAMMA = 0.99;  // Discount factor for Q-learning (default)
     
     // Training configuration
     const DEFAULT_BATCH_SIZE = 128;
     const DEFAULT_REPLAY_BUFFER_SIZE = 100000;
-    const DEFAULT_MIN_BUFFER_SIZE = 500; // Increased minimum samples before training starts (stability)
+    const DEFAULT_MIN_BUFFER_SIZE = 2000; // Increased minimum samples before training starts (stability)
     const DEFAULT_TRAIN_EVERY_N_STEPS = 4;
-    const DEFAULT_TARGET_UPDATE_EVERY = 1; // Update target model every training step (soft updates)
+    const DEFAULT_TARGET_UPDATE_EVERY = 4; // Update target model every 4 training steps (soft updates) - reduced frequency for stability
     const USE_SOFT_UPDATE = true; // Use soft updates (Polyak averaging) instead of hard updates
     
     // Epsilon-greedy defaults
     const DEFAULT_EPSILON = 0.1;
     const DEFAULT_EPSILON_START = 1.0;
-    const DEFAULT_EPSILON_END = 0.01;
-    const DEFAULT_EPSILON_DECAY = 0.98;
+    const DEFAULT_EPSILON_END = 0.05; // Increased from 0.01 to maintain more exploration
+    const DEFAULT_EPSILON_DECAY = 0.995; // Slower decay for better exploration-exploitation balance
     
     // Physics timestep (60 FPS equivalent)
     const DELTA_TIME = 1000 / 60;
@@ -544,6 +608,9 @@ export function initTraining(context) {
     // Replay buffer instance
     let replayBuffer = null;
     
+    // Reward normalizer for stable training
+    let rewardNormalizer = null;
+    
     /**
      * Copy state array into a Float32Array buffer.
      * Avoids creating new arrays on every step.
@@ -649,6 +716,9 @@ export function initTraining(context) {
         
         // Initialize replay buffer
         replayBuffer = new ReplayBuffer(DEFAULT_REPLAY_BUFFER_SIZE, STATE_SIZE);
+        
+        // Initialize reward normalizer
+        rewardNormalizer = new RewardNormalizer();
         
         console.log('[Train] Model built and compiled successfully.');
         console.log('[Train] Architecture: 256-256-128 hidden layers, batch size: ' + DEFAULT_BATCH_SIZE);
@@ -1090,6 +1160,8 @@ export function initTraining(context) {
             console.log(`[Train] Hyperparameters: gamma=${validGamma}, batchSize=${validBatchSize}, trainEveryNSteps=${validTrainEveryNSteps}`);
             console.log(`[Train] Epsilon: ${useDynamicEpsilon ? `dynamic (${currentEpsilon} -> ${validEpsilonEnd}, decay=${validEpsilonDecay})` : `fixed (${currentEpsilon})`}`);
             console.log(`[Train] minBufferSize=${validMinBufferSize}, targetUpdateEvery=${validTargetUpdateEvery}`);
+            console.log(`[Train] Prioritized replay beta annealing: ${PRIORITY_BETA_START} -> ${PRIORITY_BETA_END} over ${PRIORITY_BETA_EPISODES} episodes`);
+            console.log(`[Train] Reward normalization enabled with running statistics`);
         }
         const startTime = performance.now();
         
@@ -1135,6 +1207,11 @@ export function initTraining(context) {
                 
                 // Update learning rate based on episode count
                 updateLearningRate();
+                
+                // Compute annealed beta for prioritized replay
+                // Beta increases from PRIORITY_BETA_START to PRIORITY_BETA_END over PRIORITY_BETA_EPISODES
+                const betaProgress = Math.min(1.0, episodeCount / PRIORITY_BETA_EPISODES);
+                const currentBeta = PRIORITY_BETA_START + betaProgress * (PRIORITY_BETA_END - PRIORITY_BETA_START);
                 
                 // Reset environment for new episode
                 window.RL.resetEpisode();
@@ -1198,6 +1275,12 @@ export function initTraining(context) {
                     // Compute shaped reward (never zero) - action 3 is drop
                     const wasDrop = action === 3;
                     const { shapedReward, components } = computeShapedReward(scoreDelta, currentMaxFruit, done, wasDrop);
+                    
+                    // Update reward normalizer statistics
+                    if (rewardNormalizer) {
+                        rewardNormalizer.update(shapedReward);
+                    }
+                    
                     totalReward += shapedReward;
                     
                     // Track reward components for logging
@@ -1218,7 +1301,7 @@ export function initTraining(context) {
                     // Train on minibatch if enough samples and at training interval
                     if (canTrain && stepCount % validTrainEveryNSteps === 0) {
                         // Use prioritized replay sampling
-                        const batch = replayBuffer.getPrioritizedBatch(validBatchSize);
+                        const batch = replayBuffer.getPrioritizedBatch(validBatchSize, currentBeta);
                         const { loss, tdErrors } = trainOnBatch(batch, validGamma, verbose && trainCount === 0);
                         
                         // Update TD errors for sampled transitions
@@ -1435,6 +1518,8 @@ export function initTraining(context) {
             console.log(`[Train] Hyperparameters: gamma=${validGamma}, batchSize=${validBatchSize}, trainEveryNSteps=${validTrainEveryNSteps}`);
             console.log(`[Train] Epsilon: ${useDynamicEpsilon ? `dynamic (${currentEpsilon} -> ${validEpsilonEnd}, decay=${validEpsilonDecay})` : `fixed (${currentEpsilon})`}`);
             console.log(`[Train] minBufferSize=${validMinBufferSize}, targetUpdateEvery=${validTargetUpdateEvery}`);
+            console.log(`[Train] Prioritized replay beta annealing: ${PRIORITY_BETA_START} -> ${PRIORITY_BETA_END} over ${PRIORITY_BETA_EPISODES} episodes`);
+            console.log(`[Train] Reward normalization enabled with running statistics`);
         }
         const startTime = performance.now();
         
@@ -1464,6 +1549,11 @@ export function initTraining(context) {
                 
                 // Update learning rate based on episode count
                 updateLearningRate();
+                
+                // Compute annealed beta for prioritized replay
+                // Beta increases from PRIORITY_BETA_START to PRIORITY_BETA_END over PRIORITY_BETA_EPISODES
+                const betaProgress = Math.min(1.0, episodeCount / PRIORITY_BETA_EPISODES);
+                const currentBeta = PRIORITY_BETA_START + betaProgress * (PRIORITY_BETA_END - PRIORITY_BETA_START);
                 
                 window.RL.resetEpisode();
                 
@@ -1517,6 +1607,12 @@ export function initTraining(context) {
                     // Compute shaped reward (never zero) - action 3 is drop
                     const wasDrop = action === 3;
                     const { shapedReward, components } = computeShapedReward(scoreDelta, currentMaxFruit, done, wasDrop);
+                    
+                    // Update reward normalizer statistics
+                    if (rewardNormalizer) {
+                        rewardNormalizer.update(shapedReward);
+                    }
+                    
                     totalReward += shapedReward;
                     
                     // Track reward components for logging
@@ -1537,7 +1633,7 @@ export function initTraining(context) {
                     // Train on minibatch if enough samples and at training interval
                     if (canTrain && stepCount % validTrainEveryNSteps === 0) {
                         // Use prioritized replay sampling
-                        const batch = replayBuffer.getPrioritizedBatch(validBatchSize);
+                        const batch = replayBuffer.getPrioritizedBatch(validBatchSize, currentBeta);
                         const { loss, tdErrors } = trainOnBatch(batch, validGamma, verbose && trainCount === 0);
                         
                         // Update TD errors for sampled transitions
@@ -1704,6 +1800,11 @@ export function initTraining(context) {
                 replayBuffer = new ReplayBuffer(DEFAULT_REPLAY_BUFFER_SIZE, STATE_SIZE);
             }
             
+            // Initialize reward normalizer if not exists
+            if (!rewardNormalizer) {
+                rewardNormalizer = new RewardNormalizer();
+            }
+            
             console.log('[Train] Model loaded successfully.');
             console.log('[Train] Target model initialized with loaded weights (hard update).');
             return true;
@@ -1773,8 +1874,8 @@ export function initTraining(context) {
     console.log('[Train] Use RL.initModel() to build the model, then await RL.train(numEpisodes) to train.');
     console.log('[Train] Both RL.train() and RL.trainAsync() yield to event loop to prevent browser freeze.');
     console.log('[Train] Model architecture: 256-256-128 hidden layers with 4 output units.');
-    console.log('[Train] Batch size: ' + DEFAULT_BATCH_SIZE + ', Learning rate decay: 1e-4 → 5e-5 (100 eps) → 3e-5 (200 eps).');
-    console.log('[Train] Features: Double DQN, rank-based prioritized replay (α=' + PRIORITY_ALPHA + ', β=' + PRIORITY_BETA + '), reward shaping.');
-    console.log('[Train] Stability: Huber loss (δ=' + HUBER_DELTA + '), gradient clipping (max=' + GRADIENT_CLIP_NORM + '), soft target updates (τ=' + TAU + ').');
+    console.log('[Train] Batch size: ' + DEFAULT_BATCH_SIZE + ', Learning rate decay: 5e-5 → 3e-5 (100 eps) → 1e-5 (200 eps).');
+    console.log('[Train] Features: Double DQN, rank-based prioritized replay (α=' + PRIORITY_ALPHA + ', β annealed ' + PRIORITY_BETA_START + '→' + PRIORITY_BETA_END + '), reward normalization.');
+    console.log('[Train] Stability: Huber loss (δ=' + HUBER_DELTA + '), gradient clipping (max=' + GRADIENT_CLIP_NORM + '), soft target updates (τ=' + TAU + ', every ' + DEFAULT_TARGET_UPDATE_EVERY + ' steps).');
     console.log('[Train] Reward shaping (normalized): +' + REWARD_MERGE + ' merge, +' + REWARD_LARGE_FRUIT + ' large fruit, +' + REWARD_FRUIT_DROP + ' fruit drop, ' + REWARD_STEP_PENALTY + ' step penalty, ' + REWARD_GAME_OVER + ' game over.');
 }
