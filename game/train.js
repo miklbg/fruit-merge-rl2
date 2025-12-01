@@ -441,6 +441,7 @@ export function initTraining(context) {
     let targetModel = null;  // Target network for stable Q-learning
     let optimizer = null;
     let episodeCount = 0; // Track total episodes for learning rate decay
+    let currentLearningRate = LEARNING_RATE_INITIAL; // Track current learning rate
     
     // Track previous score for reward shaping
     let previousScore = 0;
@@ -624,8 +625,9 @@ export function initTraining(context) {
         // Create optimizer for gradient updates with initial learning rate
         optimizer = tf.train.adam(LEARNING_RATE_INITIAL);
         
-        // Reset episode count
+        // Reset episode count and current learning rate
         episodeCount = 0;
+        currentLearningRate = LEARNING_RATE_INITIAL;
         
         // Compile main model
         model.compile({
@@ -966,12 +968,13 @@ export function initTraining(context) {
         
         // Create new optimizer with updated learning rate if needed
         // TensorFlow.js optimizers have read-only learning rate, so we need to create a new instance
-        const currentLearningRate = optimizer.learningRate;
         if (optimizer && currentLearningRate !== newLearningRate) {
             // Dispose old optimizer
             optimizer.dispose();
             // Create new optimizer with new learning rate
             optimizer = tf.train.adam(newLearningRate);
+            // Update tracked learning rate
+            currentLearningRate = newLearningRate;
             // Recompile model with new optimizer
             model.compile({
                 optimizer: optimizer,
@@ -1670,10 +1673,11 @@ export function initTraining(context) {
             // Create optimizer for gradient updates with initial learning rate
             optimizer = tf.train.adam(LEARNING_RATE_INITIAL);
             
-            // Reset episode count when loading a model
+            // Reset episode count and current learning rate when loading a model
             // This restarts the learning rate decay schedule from the beginning.
             // If continuing training from a saved model, the decay will start fresh.
             episodeCount = 0;
+            currentLearningRate = LEARNING_RATE_INITIAL;
             
             // Recompile the model
             model.compile({
