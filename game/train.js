@@ -823,8 +823,8 @@ export function initTraining(context) {
             const targetNextQData = targetNextQClipped.arraySync();
             
             if (verbose) {
-                console.log('[Train] Double-DQN: Using online model for action selection, target model for evaluation');
-                console.log('[Train] Stability: Huber loss, gradient clipping, Q-value clipping enabled');
+                //console.log('[Train] Double-DQN: Using online model for action selection, target model for evaluation');
+                //console.log('[Train] Stability: Huber loss, gradient clipping, Q-value clipping enabled');
             }
             
             const statesTensor = tf.tensor2d(states, [actualBatchSize, STATE_SIZE]);
@@ -1070,7 +1070,7 @@ export function initTraining(context) {
             // Main training loop - fully synchronous
             for (let episode = 0; episode < numEpisodes; episode++) {
                 if (verbose) {
-                    console.log(`[Train] Episode ${episode + 1}/${numEpisodes} starting...`);
+                    //console.log(`[Train] Episode ${episode + 1}/${numEpisodes} starting...`);
                 }
                 
                 // Reset environment for new episode
