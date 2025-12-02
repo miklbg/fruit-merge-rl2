@@ -825,6 +825,9 @@ export function initTraining(context) {
         const gridSize = GRID_HEIGHT * GRID_WIDTH * GRID_TOTAL_CHANNELS;
         const batchGridData = new Float32Array(batchSize * gridSize);
         
+        // Reuse buffer for single grid conversion to reduce allocations
+        const tempGridBuffer = new Float32Array(gridSize);
+        
         // Convert each state in the batch
         for (let b = 0; b < batchSize; b++) {
             const stateOffset = b * STATE_SIZE;
@@ -833,10 +836,13 @@ export function initTraining(context) {
             // Extract single stacked state
             const singleState = flatStates.subarray(stateOffset, stateOffset + STATE_SIZE);
             
-            // Convert to grid (writes directly to the batch array slice)
-            const gridSlice = batchGridData.subarray(gridOffset, gridOffset + gridSize);
+            // Convert to grid (reuses tempGridBuffer)
             const gridData = convertStackedStateToGrid(singleState);
-            gridSlice.set(gridData);
+            
+            // Copy to batch array
+            for (let i = 0; i < gridSize; i++) {
+                batchGridData[gridOffset + i] = gridData[i];
+            }
         }
         
         // Create and return the 4D tensor
@@ -1003,7 +1009,7 @@ export function initTraining(context) {
         
         console.log('[Train] Model built and compiled successfully.');
         console.log('[Train] Architecture: CNN + Dueling DQN (GPU-accelerated)');
-        console.log('[Train]   - Input: Spatial grid tensor (10x15x12) - preprocessed from 465-element flat state');
+        console.log('[Train]   - Input: Spatial grid tensor (15x10x12) - preprocessed from 465-element flat state');
         console.log('[Train]   - Conv2D: 32 filters, 3x3 kernel, ReLU');
         console.log('[Train]   - Conv2D: 64 filters, 3x3 kernel, ReLU');
         console.log('[Train]   - Flatten + Dense: 256 units, ReLU');
