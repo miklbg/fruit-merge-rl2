@@ -621,7 +621,12 @@ export function initTraining(context) {
     
     /**
      * Compute n-step return from the n-step buffer.
-     * R_t^n = r_t + γ*r_{t+1} + γ^2*r_{t+2} + ... + γ^{n-1}*r_{t+n-1}
+     * For terminal transitions, just sum discounted rewards.
+     * For non-terminal, the bootstrapped Q-value will be added during training via the target model.
+     * R_t^n = r_t + γ*r_{t+1} + ... + γ^{n-1}*r_{t+n-1} (+ γ^n * Q(s_{t+n}, a*) if not done)
+     * 
+     * Note: The Q-value bootstrapping is handled by the training function using the next state,
+     * so this function only computes the cumulative discounted reward portion.
      * 
      * @param {number} gamma - Discount factor
      * @returns {number} N-step cumulative discounted reward
@@ -1335,17 +1340,27 @@ export function initTraining(context) {
                     nStepBuffer.push({
                         state: new Float32Array(stateBuffer),
                         action: action,
-                        reward: shapedReward
+                        reward: shapedReward,
+                        nextState: new Float32Array(nextStateBuffer),
+                        done: done
                     });
                     
                     // If we have N_STEP_RETURNS transitions or episode ended, add to replay buffer
                     if (nStepBuffer.length >= N_STEP_RETURNS || done) {
                         const nStepReturn = computeNStepReturn(validGamma);
                         const firstTransition = nStepBuffer[0];
+                        const lastTransition = nStepBuffer[nStepBuffer.length - 1];
                         
                         // Store transition in replay buffer with n-step return
-                        // Use the state from N steps ago, action from N steps ago, n-step return, and current next state
-                        replayBuffer.add(firstTransition.state, firstTransition.action, nStepReturn, nextStateBuffer, done);
+                        // Use the state from N steps ago, action from N steps ago, n-step return,
+                        // next state from the last transition, and done flag from the last transition
+                        replayBuffer.add(
+                            firstTransition.state, 
+                            firstTransition.action, 
+                            nStepReturn, 
+                            lastTransition.nextState, 
+                            lastTransition.done
+                        );
                         
                         // Remove the oldest transition from n-step buffer (sliding window)
                         nStepBuffer.shift();
@@ -1356,7 +1371,16 @@ export function initTraining(context) {
                         while (nStepBuffer.length > 0) {
                             const nStepReturn = computeNStepReturn(validGamma);
                             const firstTransition = nStepBuffer[0];
-                            replayBuffer.add(firstTransition.state, firstTransition.action, nStepReturn, nextStateBuffer, done);
+                            const lastTransition = nStepBuffer[nStepBuffer.length - 1];
+                            
+                            // Each remaining transition uses its proper next state and done flag
+                            replayBuffer.add(
+                                firstTransition.state, 
+                                firstTransition.action, 
+                                nStepReturn, 
+                                lastTransition.nextState, 
+                                lastTransition.done
+                            );
                             nStepBuffer.shift();
                         }
                     }
@@ -1710,17 +1734,27 @@ export function initTraining(context) {
                     nStepBuffer.push({
                         state: new Float32Array(stateBuffer),
                         action: action,
-                        reward: shapedReward
+                        reward: shapedReward,
+                        nextState: new Float32Array(nextStateBuffer),
+                        done: done
                     });
                     
                     // If we have N_STEP_RETURNS transitions or episode ended, add to replay buffer
                     if (nStepBuffer.length >= N_STEP_RETURNS || done) {
                         const nStepReturn = computeNStepReturn(validGamma);
                         const firstTransition = nStepBuffer[0];
+                        const lastTransition = nStepBuffer[nStepBuffer.length - 1];
                         
                         // Store transition in replay buffer with n-step return
-                        // Use the state from N steps ago, action from N steps ago, n-step return, and current next state
-                        replayBuffer.add(firstTransition.state, firstTransition.action, nStepReturn, nextStateBuffer, done);
+                        // Use the state from N steps ago, action from N steps ago, n-step return,
+                        // next state from the last transition, and done flag from the last transition
+                        replayBuffer.add(
+                            firstTransition.state, 
+                            firstTransition.action, 
+                            nStepReturn, 
+                            lastTransition.nextState, 
+                            lastTransition.done
+                        );
                         
                         // Remove the oldest transition from n-step buffer (sliding window)
                         nStepBuffer.shift();
@@ -1731,7 +1765,16 @@ export function initTraining(context) {
                         while (nStepBuffer.length > 0) {
                             const nStepReturn = computeNStepReturn(validGamma);
                             const firstTransition = nStepBuffer[0];
-                            replayBuffer.add(firstTransition.state, firstTransition.action, nStepReturn, nextStateBuffer, done);
+                            const lastTransition = nStepBuffer[nStepBuffer.length - 1];
+                            
+                            // Each remaining transition uses its proper next state and done flag
+                            replayBuffer.add(
+                                firstTransition.state, 
+                                firstTransition.action, 
+                                nStepReturn, 
+                                lastTransition.nextState, 
+                                lastTransition.done
+                            );
                             nStepBuffer.shift();
                         }
                     }
