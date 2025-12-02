@@ -643,7 +643,7 @@ export function initTraining(context) {
      * 
      * The spatial grid is GRID_WIDTH x GRID_HEIGHT x GRID_CHANNELS:
      * - Channel 0: Board fruits (fruit level at each grid cell, max if multiple fruits)
-     * - Channel 1: Current falling fruit indicator (1.0 where current fruit is located)
+     * - Channel 1: Current falling fruit (current fruit level at its grid position)
      * - Channel 2: Next fruit level (constant across all cells)
      * - Channel 3: Booster availability (constant across all cells)
      * 
@@ -701,18 +701,20 @@ export function initTraining(context) {
         }
         
         // Channel 2: Next fruit level (constant across all cells)
+        const channel2Offset = 2;
         for (let y = 0; y < GRID_HEIGHT; y++) {
+            const rowOffset = y * GRID_WIDTH * GRID_CHANNELS + channel2Offset;
             for (let x = 0; x < GRID_WIDTH; x++) {
-                const idx = getGridBufferIndex(x, y, 2);
-                gridBuffer[idx] = nextLevel;
+                gridBuffer[rowOffset + x * GRID_CHANNELS] = nextLevel;
             }
         }
         
         // Channel 3: Booster availability (constant across all cells)
+        const channel3Offset = 3;
         for (let y = 0; y < GRID_HEIGHT; y++) {
+            const rowOffset = y * GRID_WIDTH * GRID_CHANNELS + channel3Offset;
             for (let x = 0; x < GRID_WIDTH; x++) {
-                const idx = getGridBufferIndex(x, y, 3);
-                gridBuffer[idx] = boosterAvailable;
+                gridBuffer[rowOffset + x * GRID_CHANNELS] = boosterAvailable;
             }
         }
     }
@@ -834,7 +836,10 @@ export function initTraining(context) {
         const input = tf.input({shape: [STATE_SIZE]});
         
         // Lambda layer to convert flat state to spatial grid
-        // This uses TensorFlow operations for GPU acceleration
+        // NOTE: This uses arraySync() which is a performance bottleneck that breaks GPU acceleration.
+        // For production use, consider preprocessing states to grid format before feeding to the model,
+        // or implementing the conversion using native TensorFlow operations.
+        // This implementation prioritizes code clarity and compatibility with existing training loop.
         const gridInput = tf.layers.lambda({
             computeOutputShape: (inputShape) => {
                 return [null, GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS];
