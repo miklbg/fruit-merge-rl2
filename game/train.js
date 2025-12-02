@@ -783,12 +783,12 @@ export function initTraining(context) {
         }
         
         call(inputs, kwargs) {
+            // Reset noise OUTSIDE of tf.tidy() to avoid memory management issues
+            // The noise tensors are stored as instance variables and managed manually
+            this.resetNoise();
+            
             return tf.tidy(() => {
                 const input = inputs instanceof Array ? inputs[0] : inputs;
-                
-                // Reset noise for each forward pass (per NoisyNet paper)
-                // This is intentional and provides automatic exploration
-                this.resetNoise();
                 
                 // Compute factorized noise for weights: ε_w = ε_input ⊗ ε_output
                 // This gives us a [inputDim, units] noise matrix
