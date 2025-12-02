@@ -22,15 +22,6 @@ export async function initTFBackend() {
         return currentBackend;
     }
 
-    // Check if backend was already set by inline script
-    const existingBackend = tf.getBackend();
-    if (existingBackend && existingBackend !== 'cpu') {
-        backendInitialized = true;
-        currentBackend = existingBackend;
-        console.log(`[TF Backend] Using existing backend: ${currentBackend}`);
-        return currentBackend;
-    }
-
     try {
         await tf.setBackend('webgpu');
         await tf.ready();
