@@ -1311,14 +1311,26 @@ export function initTraining(context) {
                         console.log(`[Train] Mean TD error: ${avgMeanTDError.toFixed(4)}`);
                     }
                 }
+                
+                // Save model and metadata after each episode
+                try {
+                    await model.save('localstorage://fruit-merge-dqn-v1');
+                    await saveTrainingMetadata();
+                    if (verbose && (episode + 1) % 5 === 0) {
+                        console.log(`[Train] Progress saved at episode ${episode + 1}`);
+                    }
+                } catch (err) {
+                    console.error('[Train] Failed to save training progress:', err);
+                }
             }
             
-            // Save model to localStorage
+            // Final save to localStorage
             if (verbose) {
-                console.log('[Train] Saving model to localStorage...');
+                console.log('[Train] Saving final model to localStorage...');
             }
             try {
                 await model.save('localstorage://fruit-merge-dqn-v1');
+                await saveTrainingMetadata();
                 if (verbose) {
                     console.log('[Train] Model saved successfully to localstorage://fruit-merge-dqn-v1');
                 }
@@ -1632,12 +1644,24 @@ export function initTraining(context) {
                         console.log(`[Train] Mean TD error: ${avgMeanTDError.toFixed(4)}`);
                     }
                 }
+                
+                // Save model and metadata after each episode
+                try {
+                    await model.save('localstorage://fruit-merge-dqn-v1');
+                    await saveTrainingMetadata();
+                    if (verbose && (episode + 1) % 5 === 0) {
+                        console.log(`[Train] Progress saved at episode ${episode + 1}`);
+                    }
+                } catch (err) {
+                    console.error('[Train] Failed to save training progress:', err);
+                }
             }
             
             if (verbose) {
-                console.log('[Train] Saving model to localStorage...');
+                console.log('[Train] Saving final model to localStorage...');
             }
             await model.save('localstorage://fruit-merge-dqn-v1');
+            await saveTrainingMetadata();
             if (verbose) {
                 console.log('[Train] Model saved successfully.');
             }
@@ -1680,6 +1704,38 @@ export function initTraining(context) {
     };
     
     /**
+     * Save training metadata (episode count, epsilon, etc.) to localStorage.
+     */
+    async function saveTrainingMetadata() {
+        try {
+            const metadata = {
+                episodeCount: episodeCount,
+                currentLearningRate: currentLearningRate,
+                timestamp: Date.now()
+            };
+            localStorage.setItem('fruit-merge-dqn-metadata', JSON.stringify(metadata));
+        } catch (error) {
+            console.error('[Train] Failed to save training metadata:', error);
+        }
+    }
+    
+    /**
+     * Load training metadata from localStorage.
+     * @returns {Object|null} Metadata object or null if not found
+     */
+    function loadTrainingMetadata() {
+        try {
+            const metadataStr = localStorage.getItem('fruit-merge-dqn-metadata');
+            if (metadataStr) {
+                return JSON.parse(metadataStr);
+            }
+        } catch (error) {
+            console.error('[Train] Failed to load training metadata:', error);
+        }
+        return null;
+    }
+    
+    /**
      * Load a previously saved model from localStorage.
      * Also creates and initializes the target model.
      * 
@@ -1690,14 +1746,21 @@ export function initTraining(context) {
             console.log('[Train] Loading model from localStorage...');
             model = await tf.loadLayersModel('localstorage://fruit-merge-dqn-v1');
             
-            // Create optimizer for gradient updates with initial learning rate
-            optimizer = tf.train.adam(LEARNING_RATE_INITIAL);
+            // Load training metadata to continue from saved state
+            const metadata = loadTrainingMetadata();
+            if (metadata) {
+                episodeCount = metadata.episodeCount || 0;
+                currentLearningRate = metadata.currentLearningRate || LEARNING_RATE_INITIAL;
+                console.log(`[Train] Loaded training metadata: episodeCount=${episodeCount}, learningRate=${currentLearningRate}`);
+            } else {
+                // No metadata found, start fresh
+                episodeCount = 0;
+                currentLearningRate = LEARNING_RATE_INITIAL;
+                console.log('[Train] No metadata found, starting from episode 0');
+            }
             
-            // Reset episode count and current learning rate when loading a model
-            // This restarts the learning rate decay schedule from the beginning.
-            // If continuing training from a saved model, the decay will start fresh.
-            episodeCount = 0;
-            currentLearningRate = LEARNING_RATE_INITIAL;
+            // Create optimizer with loaded learning rate
+            optimizer = tf.train.adam(currentLearningRate);
             
             // Recompile the model
             model.compile({
@@ -1708,7 +1771,7 @@ export function initTraining(context) {
             // Create and initialize target model
             targetModel = createQNetwork();
             targetModel.compile({
-                optimizer: tf.train.adam(LEARNING_RATE_INITIAL),
+                optimizer: tf.train.adam(currentLearningRate),
                 loss: 'meanSquaredError'
             });
             // Use hard update when loading to ensure exact weight copy
