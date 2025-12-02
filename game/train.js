@@ -741,7 +741,11 @@ export function initTraining(context) {
         // Combine streams using dueling formula: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))
         // This is implemented as a custom lambda layer
         const output = tf.layers.lambda({
-            computeOutputShape: (inputShape) => inputShape[1], // Output shape is same as advantage stream
+            computeOutputShape: (inputShape) => {
+                // inputShape is array of shapes: [[batch, 1], [batch, NUM_ACTIONS]]
+                // Return the advantage stream shape (second input)
+                return [null, NUM_ACTIONS];
+            },
             apply: (inputs) => {
                 return tf.tidy(() => {
                     const value = inputs[0];  // Shape: [batch, 1]
@@ -751,11 +755,14 @@ export function initTraining(context) {
                     // keepdims=true maintains the dimension for broadcasting
                     const advantageMean = tf.mean(advantage, 1, true);  // Shape: [batch, 1]
                     
-                    // Compute Q-values: V(s) + (A(s,a) - mean(A(s,a)))
-                    // Broadcasting handles the dimension alignment
-                    const qValues = tf.add(value, tf.sub(advantage, advantageMean));
+                    // Compute centered advantages: A(s,a) - mean(A(s,a))
+                    const centeredAdvantage = tf.sub(advantage, advantageMean);  // Shape: [batch, NUM_ACTIONS]
                     
-                    return qValues;  // Shape: [batch, NUM_ACTIONS]
+                    // Compute Q-values: V(s) + (A(s,a) - mean(A(s,a)))
+                    // Broadcasting handles the dimension alignment (value is [batch, 1] broadcast to [batch, NUM_ACTIONS])
+                    const qValues = tf.add(value, centeredAdvantage);  // Shape: [batch, NUM_ACTIONS]
+                    
+                    return qValues;
                 });
             },
             name: 'dueling_aggregation'
