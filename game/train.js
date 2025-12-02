@@ -813,12 +813,45 @@ export function initTraining(context) {
     }
     
     /**
+     * Convert a batch of flat states to grid tensor for GPU-accelerated processing.
+     * This function runs on the CPU but allows the model to run fully on GPU.
+     * 
+     * @param {Float32Array} flatStates - Flat states array (batchSize * STATE_SIZE)
+     * @param {number} batchSize - Number of states in the batch
+     * @returns {tf.Tensor4D} Grid tensor with shape [batchSize, GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS]
+     */
+    function convertBatchToGridTensor(flatStates, batchSize) {
+        // Pre-allocate the grid data array
+        const gridSize = GRID_HEIGHT * GRID_WIDTH * GRID_TOTAL_CHANNELS;
+        const batchGridData = new Float32Array(batchSize * gridSize);
+        
+        // Convert each state in the batch
+        for (let b = 0; b < batchSize; b++) {
+            const stateOffset = b * STATE_SIZE;
+            const gridOffset = b * gridSize;
+            
+            // Extract single stacked state
+            const singleState = flatStates.subarray(stateOffset, stateOffset + STATE_SIZE);
+            
+            // Convert to grid (writes directly to the batch array slice)
+            const gridSlice = batchGridData.subarray(gridOffset, gridOffset + gridSize);
+            const gridData = convertStackedStateToGrid(singleState);
+            gridSlice.set(gridData);
+        }
+        
+        // Create and return the 4D tensor
+        return tf.tensor4d(
+            batchGridData,
+            [batchSize, GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS]
+        );
+    }
+    
+    /**
      * Create a Q-network model with CNN + dueling DQN architecture.
      * Used for both main model and target model.
      * 
      * Architecture:
-     * - Input: Flat state vector (465 elements = 155 * 3 frames)
-     * - Reshape: Convert to spatial grid (GRID_HEIGHT x GRID_WIDTH x GRID_TOTAL_CHANNELS)
+     * - Input: Spatial grid tensor (GRID_HEIGHT x GRID_WIDTH x GRID_TOTAL_CHANNELS)
      * - Conv2D: 32 filters, 3x3 kernel, stride 1, ReLU
      * - Conv2D: 64 filters, 3x3 kernel, stride 1, ReLU
      * - Flatten
@@ -829,63 +862,14 @@ export function initTraining(context) {
      * - Combine: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))
      * - Output: 4 units (Q-values for each action)
      * 
+     * Note: States are preprocessed to grid format before feeding to the model,
+     * enabling full GPU acceleration throughout the network.
+     * 
      * @returns {tf.LayersModel} The created model
      */
     function createQNetwork() {
-        // Input layer - flat stacked state (465 elements)
-        const input = tf.input({shape: [STATE_SIZE]});
-        
-        // Lambda layer to convert flat state to spatial grid
-        // NOTE: This uses arraySync() which is a performance bottleneck that breaks GPU acceleration.
-        // For production use, consider preprocessing states to grid format before feeding to the model,
-        // or implementing the conversion using native TensorFlow operations.
-        // This implementation prioritizes code clarity and compatibility with existing training loop.
-        const gridInput = tf.layers.lambda({
-            computeOutputShape: (inputShape) => {
-                return [null, GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS];
-            },
-            apply: (inputs) => {
-                return tf.tidy(() => {
-                    // inputs shape: [batch, 465]
-                    const batchedStates = inputs;
-                    
-                    // We need to convert the flat state to grid format
-                    // Since this is complex custom logic, we'll process each sample in the batch
-                    // Note: For efficiency, this should ideally be done in the training loop
-                    // before feeding to the model, but we'll implement it here as a lambda layer
-                    
-                    // Split by batch to process individually
-                    const unstacked = tf.unstack(batchedStates, 0);
-                    const grids = unstacked.map(stateTensor => {
-                        return tf.tidy(() => {
-                            // Convert tensor to array for processing
-                            const stateArray = stateTensor.arraySync();
-                            
-                            // Convert using our conversion function
-                            const gridData = convertStackedStateToGrid(new Float32Array(stateArray));
-                            
-                            // Create tensor with shape [GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS]
-                            const gridTensor = tf.tensor3d(
-                                Array.from(gridData),
-                                [GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS]
-                            );
-                            
-                            return gridTensor;
-                        });
-                    });
-                    
-                    // Stack back into batch
-                    const batchedGrid = tf.stack(grids, 0);
-                    
-                    // Dispose intermediate tensors
-                    unstacked.forEach(t => t.dispose());
-                    grids.forEach(t => t.dispose());
-                    
-                    return batchedGrid;
-                });
-            },
-            name: 'state_to_grid'
-        }).apply(input);
+        // Input layer - spatial grid (no flat state conversion needed)
+        const input = tf.input({shape: [GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS]});
         
         // First convolutional layer
         let conv = tf.layers.conv2d({
@@ -895,7 +879,7 @@ export function initTraining(context) {
             activation: 'relu',
             kernelInitializer: 'heNormal',
             name: 'conv2d_1'
-        }).apply(gridInput);
+        }).apply(input);
         
         // Second convolutional layer
         conv = tf.layers.conv2d({
@@ -1018,14 +1002,15 @@ export function initTraining(context) {
         replayBuffer = new ReplayBuffer(DEFAULT_REPLAY_BUFFER_SIZE, STATE_SIZE);
         
         console.log('[Train] Model built and compiled successfully.');
-        console.log('[Train] Architecture: CNN + Dueling DQN');
-        console.log('[Train]   - Input: 465-element flat state (155 * 3 frames)');
-        console.log('[Train]   - Spatial Grid: 10x15x12 (width x height x channels)');
+        console.log('[Train] Architecture: CNN + Dueling DQN (GPU-accelerated)');
+        console.log('[Train]   - Input: Spatial grid tensor (10x15x12) - preprocessed from 465-element flat state');
         console.log('[Train]   - Conv2D: 32 filters, 3x3 kernel, ReLU');
         console.log('[Train]   - Conv2D: 64 filters, 3x3 kernel, ReLU');
         console.log('[Train]   - Flatten + Dense: 256 units, ReLU');
         console.log('[Train]   - Dueling streams: Value (1 unit) + Advantage (4 units)');
         console.log('[Train]   - Output: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))');
+        console.log('[Train] Preprocessing: States converted to grids before model input (CPU)');
+        console.log('[Train] Processing: Full GPU acceleration from Conv2D through output');
         console.log('[Train] Batch size: ' + DEFAULT_BATCH_SIZE);
         console.log('[Train] Learning rate decay: ' + LEARNING_RATE_INITIAL + ' → ' + LEARNING_RATE_100 + ' (100 eps) → ' + LEARNING_RATE_200 + ' (200 eps)');
         console.log('[Train] Target model initialized with same weights (hard update).');
@@ -1092,14 +1077,16 @@ export function initTraining(context) {
     /**
      * Batched prediction for multiple states.
      * More efficient than individual predict calls.
+     * Converts flat states to grid format for GPU-accelerated CNN processing.
+     * 
      * @param {Float32Array} statesFlat - Flattened states array (batchSize * stateSize)
      * @param {number} batchSize - Number of states in the batch
      * @returns {Float32Array} Q-values for all states (batchSize * numActions)
      */
     function batchedPredict(statesFlat, batchSize) {
         return tf.tidy(() => {
-            const statesTensor = tf.tensor2d(statesFlat, [batchSize, STATE_SIZE]);
-            const qValues = model.predict(statesTensor);
+            const gridTensor = convertBatchToGridTensor(statesFlat, batchSize);
+            const qValues = model.predict(gridTensor);
             return qValues.dataSync();
         });
     }
@@ -1107,6 +1094,7 @@ export function initTraining(context) {
     /**
      * Select action using epsilon-greedy policy with pre-allocated buffer.
      * Uses tf.tidy() to prevent memory leaks.
+     * Converts flat state to grid format for GPU-accelerated CNN processing.
      * 
      * @param {Float32Array} stateBuffer - Pre-allocated state buffer
      * @param {number} epsilon - Exploration rate (0-1)
@@ -1120,8 +1108,8 @@ export function initTraining(context) {
         
         // Otherwise, choose action with highest Q-value (exploitation)
         return tf.tidy(() => {
-            const stateTensor = tf.tensor2d(stateBuffer, [1, STATE_SIZE]);
-            const qValues = model.predict(stateTensor);
+            const gridTensor = convertBatchToGridTensor(stateBuffer, 1);
+            const qValues = model.predict(gridTensor);
             return qValues.argMax(1).dataSync()[0];
         });
     }
@@ -1205,15 +1193,16 @@ export function initTraining(context) {
         
         // Compute targets and TD errors using Double DQN inside tf.tidy()
         const { targets, currentQForActions } = tf.tidy(() => {
-            const nextStatesTensor = tf.tensor2d(nextStates, [actualBatchSize, STATE_SIZE]);
+            // Convert next states to grid format for GPU-accelerated processing
+            const nextStatesGridTensor = convertBatchToGridTensor(nextStates, actualBatchSize);
             
             // DOUBLE DQN: Use ONLINE model to select actions
-            const onlineNextQValues = model.predict(nextStatesTensor);
+            const onlineNextQValues = model.predict(nextStatesGridTensor);
             const bestActions = onlineNextQValues.argMax(1).dataSync();
             
             // DOUBLE DQN: Use TARGET model to evaluate the selected actions
             // Clip target Q-values to prevent extreme values
-            const targetNextQValues = targetModel.predict(nextStatesTensor);
+            const targetNextQValues = targetModel.predict(nextStatesGridTensor);
             const targetNextQClipped = tf.clipByValue(targetNextQValues, -MAX_Q_VALUE, MAX_Q_VALUE);
             const targetNextQData = targetNextQClipped.arraySync();
             
@@ -1222,8 +1211,9 @@ export function initTraining(context) {
                 //console.log('[Train] Stability: Huber loss, gradient clipping, Q-value clipping enabled');
             }
             
-            const statesTensor = tf.tensor2d(states, [actualBatchSize, STATE_SIZE]);
-            const currentQValues = model.predict(statesTensor);
+            // Convert current states to grid format
+            const statesGridTensor = convertBatchToGridTensor(states, actualBatchSize);
+            const currentQValues = model.predict(statesGridTensor);
             const currentQData = currentQValues.arraySync();
             
             // Store current Q values for the taken actions (for TD error calculation)
@@ -1258,7 +1248,7 @@ export function initTraining(context) {
         });
         
         // Compute gradients and apply using optimizer with gradient clipping
-        const statesTensor = tf.tensor2d(states, [actualBatchSize, STATE_SIZE]);
+        const statesGridTensor = convertBatchToGridTensor(states, actualBatchSize);
         
         // Create weights tensor if we have importance sampling weights
         let weightsTensor = null;
@@ -1268,7 +1258,7 @@ export function initTraining(context) {
         
         // Define loss function using Huber loss for stability
         const lossFunction = () => {
-            const predictions = model.predict(statesTensor);
+            const predictions = model.predict(statesGridTensor);
             
             if (weightsTensor) {
                 // Weighted Huber loss for prioritized experience replay
@@ -1313,7 +1303,7 @@ export function initTraining(context) {
         
         // Clean up tensors
         targets.dispose();
-        statesTensor.dispose();
+        statesGridTensor.dispose();
         loss.dispose();
         Object.values(grads).forEach(g => g.dispose());
         Object.values(clippedGrads).forEach(g => g.dispose());
