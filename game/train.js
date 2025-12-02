@@ -58,7 +58,7 @@ let gameContext = null;
  * α (alpha) controls how much prioritization is used (0 = uniform, 1 = full prioritization)
  * β (beta) controls importance-sampling correction (0 = no correction, 1 = full correction)
  */
-const PRIORITY_ALPHA = 0.6;  // Reduced from 0.7 for more uniform sampling (stability)
+const PRIORITY_ALPHA = 0.7;  // Prioritization strength for prioritized experience replay
 const PRIORITY_BETA_START = 0.4;   // Starting beta for importance sampling (was constant 0.4)
 const PRIORITY_BETA_END = 1.0;     // Final beta - full correction for later training
 const PRIORITY_BETA_EPISODES = 200; // Number of episodes to anneal beta from start to end
@@ -403,9 +403,10 @@ export function initTraining(context) {
     // Model configuration
     const STATE_SIZE = 155;  // 155-element state vector
     const NUM_ACTIONS = 4;   // 4 discrete actions (left, right, center, drop)
-    const HIDDEN_UNITS_1 = 256; // First hidden layer units
-    const HIDDEN_UNITS_2 = 256; // Second hidden layer units
-    const HIDDEN_UNITS_3 = 128; // Third hidden layer units
+    const HIDDEN_UNITS_1 = 512; // First hidden layer units
+    const HIDDEN_UNITS_2 = 512; // Second hidden layer units
+    const HIDDEN_UNITS_3 = 256; // Third hidden layer units
+    const HIDDEN_UNITS_4 = 128; // Fourth hidden layer units
     const LEARNING_RATE_INITIAL = 0.0001; // Initial Adam optimizer learning rate (1e-4)
     const LEARNING_RATE_100 = 0.00005; // Learning rate after 100 episodes (5e-5)
     const LEARNING_RATE_200 = 0.00003; // Learning rate after 200 episodes (3e-5)
@@ -415,15 +416,15 @@ export function initTraining(context) {
     const DEFAULT_BATCH_SIZE = 128;
     const DEFAULT_REPLAY_BUFFER_SIZE = 100000;
     const DEFAULT_MIN_BUFFER_SIZE = 2000; // Increased minimum samples before training starts (stability)
-    const DEFAULT_TRAIN_EVERY_N_STEPS = 4;
+    const DEFAULT_TRAIN_EVERY_N_STEPS = 2;
     const DEFAULT_TARGET_UPDATE_EVERY = 1; // Update target model every training step (soft updates)
     const USE_SOFT_UPDATE = true; // Use soft updates (Polyak averaging) instead of hard updates
     
     // Epsilon-greedy defaults
     const DEFAULT_EPSILON = 0.1;
     const DEFAULT_EPSILON_START = 1.0;
-    const DEFAULT_EPSILON_END = 0.01;
-    const DEFAULT_EPSILON_DECAY = 0.98;
+    const DEFAULT_EPSILON_END = 0.1;
+    const DEFAULT_EPSILON_DECAY = 0.995;
     
     // Physics timestep (60 FPS equivalent)
     const DELTA_TIME = 1000 / 60;
@@ -570,7 +571,8 @@ export function initTraining(context) {
      * 
      * Architecture:
      * - Input: 155-element state vector
-     * - Dense: 256 units, ReLU
+     * - Dense: 512 units, ReLU
+     * - Dense: 512 units, ReLU
      * - Dense: 256 units, ReLU
      * - Dense: 128 units, ReLU
      * - Output: 4 units (Q-values for each action)
@@ -598,6 +600,13 @@ export function initTraining(context) {
         // Third hidden layer
         network.add(tf.layers.dense({
             units: HIDDEN_UNITS_3,
+            activation: 'relu',
+            kernelInitializer: 'heNormal'
+        }));
+        
+        // Fourth hidden layer
+        network.add(tf.layers.dense({
+            units: HIDDEN_UNITS_4,
             activation: 'relu',
             kernelInitializer: 'heNormal'
         }));
@@ -654,7 +663,7 @@ export function initTraining(context) {
         replayBuffer = new ReplayBuffer(DEFAULT_REPLAY_BUFFER_SIZE, STATE_SIZE);
         
         console.log('[Train] Model built and compiled successfully.');
-        console.log('[Train] Architecture: 256-256-128 hidden layers, batch size: ' + DEFAULT_BATCH_SIZE);
+        console.log('[Train] Architecture: 512-512-256-128 hidden layers, batch size: ' + DEFAULT_BATCH_SIZE);
         console.log('[Train] Learning rate decay: ' + LEARNING_RATE_INITIAL + ' → ' + LEARNING_RATE_100 + ' (100 eps) → ' + LEARNING_RATE_200 + ' (200 eps)');
         console.log('[Train] Target model initialized with same weights (hard update).');
         console.log('[Train] Stability features enabled: Huber loss, gradient clipping, soft target updates (τ=' + TAU + ').');
@@ -1850,7 +1859,7 @@ export function initTraining(context) {
     console.log('[Train] Optimized training module initialized.');
     console.log('[Train] Use RL.initModel() to build the model, then await RL.train(numEpisodes) to train.');
     console.log('[Train] Both RL.train() and RL.trainAsync() yield to event loop to prevent browser freeze.');
-    console.log('[Train] Model architecture: 256-256-128 hidden layers with 4 output units.');
+    console.log('[Train] Model architecture: 512-512-256-128 hidden layers with 4 output units.');
     console.log('[Train] Batch size: ' + DEFAULT_BATCH_SIZE + ', Learning rate decay: 1e-4 → 5e-5 (100 eps) → 3e-5 (200 eps).');
     console.log('[Train] Features: Double DQN, rank-based prioritized replay (α=' + PRIORITY_ALPHA + ', β annealed ' + PRIORITY_BETA_START + '→' + PRIORITY_BETA_END + '), reward shaping.');
     console.log('[Train] Stability: Huber loss (δ=' + HUBER_DELTA + '), gradient clipping (max=' + GRADIENT_CLIP_NORM + '), soft target updates (τ=' + TAU + ').');
