@@ -5,6 +5,9 @@
  * BEFORE any model or tensor creation to prevent backend initialization errors.
  * 
  * Must be imported and executed BEFORE any other TensorFlow.js operations.
+ * 
+ * Note: This module relies on the global `tf` object loaded via CDN scripts in index.html.
+ * The tf.js core library must be loaded before this module is executed.
  */
 
 let backendInitialized = false;
@@ -13,6 +16,8 @@ let currentBackend = null;
 /**
  * Initialize TensorFlow.js backend with WebGPU preference and WASM fallback.
  * This function MUST be called before any model creation or tensor operations.
+ * 
+ * Requires: Global `tf` object from @tensorflow/tfjs CDN script
  * 
  * @returns {Promise<string>} The initialized backend name ('webgpu' or 'wasm')
  */
