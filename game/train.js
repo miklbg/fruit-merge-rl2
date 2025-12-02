@@ -6,7 +6,7 @@
  * - Batched predictions for action selection and Q-target computation
  * - Fixed-size ring buffer replay with O(1) add and sample operations
  * - Target network for stable Q-learning (soft updates with τ parameter)
- * - Epsilon-greedy exploration with dynamic decay
+ * - NoisyNet exploration with factorized Gaussian noise (replaces epsilon-greedy)
  * - Batched gradient updates using tf.variableGrads() and optimizer.applyGradients()
  * - tf.tidy() wrapping for automatic memory management
  * - Async training loop with periodic yields (prevents browser freeze)
@@ -24,18 +24,13 @@
  *   RL.initModel();                        // Build and compile main + target models
  *   await RL.train(5);                     // Run 5 episodes of training
  *   await RL.train(5, { batchSize: 64 });  // Use batch size of 64
- *   await RL.train(5, { epsilon: 0.1 });   // Use 10% fixed exploration
- *   await RL.train(5, {                    // Use dynamic epsilon decay
- *     epsilonStart: 1.0,
- *     epsilonEnd: 0.01,
- *     epsilonDecay: 0.995
- *   });
+ *   // Note: epsilon parameters are ignored - NoisyNet provides exploration
  * 
  * API:
- *   RL.initModel()           - Build main and target models
+ *   RL.initModel()           - Build main and target models with NoisyNet layers
  *   RL.train(n, opts)        - Train for n episodes
  *   RL.trainAsync(n, opts)   - Same as train, for UI compatibility
- *   RL.selectAction(s, eps)  - Select action using epsilon-greedy policy
+ *   RL.selectAction(s)       - Select action using noisy Q-values (epsilon ignored)
  *   RL.updateTargetModel()   - Copy weights from main to target model (soft update)
  *   RL.getReplayBuffer()     - Get the replay buffer instance
  *   RL.clearReplayBuffer()   - Clear the replay buffer
@@ -669,6 +664,165 @@ export function initTraining(context) {
     }
     
     /**
+     * Custom NoisyDense layer using factorized Gaussian noise.
+     * Implements the NoisyNet formula: y = (μ_w + σ_w ⊙ ε_w) x + (μ_b + σ_b ⊙ ε_b)
+     * 
+     * Noise is reset at each forward pass for exploration.
+     * 
+     * @class NoisyDense
+     */
+    class NoisyDense extends tf.layers.Layer {
+        constructor(config) {
+            super(config);
+            this.units = config.units;
+            this.activation = config.activation || 'linear';
+            this.useBias = config.useBias !== undefined ? config.useBias : true;
+            
+            // Factorized noise parameters
+            // For input dimension p and output dimension q:
+            // We use factorized noise: ε_w = f(ε_i) ⊗ f(ε_j)
+            // This reduces noise parameters from p*q to p+q
+            this.inputDim = null; // Set in build()
+            
+            // Trainable parameters
+            this.muWeight = null;
+            this.sigmaWeight = null;
+            this.muBias = null;
+            this.sigmaBias = null;
+            
+            // Noise samples (not trainable, regenerated each forward pass)
+            this.epsilonInput = null;
+            this.epsilonOutput = null;
+        }
+        
+        build(inputShape) {
+            this.inputDim = inputShape[inputShape.length - 1];
+            
+            // Initialize μ_w and σ_w for weights
+            // Using uniform initialization from original paper
+            const muRange = 1.0 / Math.sqrt(this.inputDim);
+            const sigmaInit = 0.017; // Standard value from NoisyNet paper
+            
+            this.muWeight = this.addWeight(
+                'mu_weight',
+                [this.inputDim, this.units],
+                'float32',
+                tf.initializers.randomUniform({minval: -muRange, maxval: muRange})
+            );
+            
+            this.sigmaWeight = this.addWeight(
+                'sigma_weight',
+                [this.inputDim, this.units],
+                'float32',
+                tf.initializers.constant({value: sigmaInit})
+            );
+            
+            if (this.useBias) {
+                this.muBias = this.addWeight(
+                    'mu_bias',
+                    [this.units],
+                    'float32',
+                    tf.initializers.randomUniform({minval: -muRange, maxval: muRange})
+                );
+                
+                this.sigmaBias = this.addWeight(
+                    'sigma_bias',
+                    [this.units],
+                    'float32',
+                    tf.initializers.constant({value: sigmaInit})
+                );
+            }
+            
+            super.build(inputShape);
+        }
+        
+        /**
+         * Generate factorized Gaussian noise using f(x) = sgn(x) * sqrt(|x|)
+         * This is the factorization function from the NoisyNet paper.
+         */
+        factorizedNoise(size) {
+            return tf.tidy(() => {
+                const noise = tf.randomNormal([size]);
+                // f(x) = sgn(x) * sqrt(|x|)
+                const sign = tf.sign(noise);
+                const abs = tf.abs(noise);
+                const sqrt = tf.sqrt(abs);
+                return tf.mul(sign, sqrt);
+            });
+        }
+        
+        /**
+         * Reset noise samples (called at each forward pass)
+         */
+        resetNoise() {
+            this.epsilonInput = this.factorizedNoise(this.inputDim);
+            this.epsilonOutput = this.factorizedNoise(this.units);
+        }
+        
+        call(inputs, kwargs) {
+            return tf.tidy(() => {
+                const input = inputs instanceof Array ? inputs[0] : inputs;
+                
+                // Reset noise for each forward pass
+                this.resetNoise();
+                
+                // Compute factorized noise for weights: ε_w = ε_input ⊗ ε_output
+                // This gives us a [inputDim, units] noise matrix
+                const epsilonWeight = tf.outerProduct(this.epsilonInput, this.epsilonOutput);
+                
+                // Compute noisy weights: w = μ_w + σ_w ⊙ ε_w
+                const noisyWeight = tf.add(
+                    this.muWeight.read(),
+                    tf.mul(this.sigmaWeight.read(), epsilonWeight)
+                );
+                
+                // Apply linear transformation: y = x * w
+                let output = tf.matMul(input, noisyWeight);
+                
+                if (this.useBias) {
+                    // Compute noisy bias: b = μ_b + σ_b ⊙ ε_output
+                    const noisyBias = tf.add(
+                        this.muBias.read(),
+                        tf.mul(this.sigmaBias.read(), this.epsilonOutput)
+                    );
+                    
+                    // Add bias: y = y + b
+                    output = tf.add(output, noisyBias);
+                }
+                
+                // Apply activation
+                if (this.activation !== 'linear') {
+                    const activationFn = tf.layers.activation({activation: this.activation});
+                    output = activationFn.apply(output);
+                }
+                
+                return output;
+            });
+        }
+        
+        computeOutputShape(inputShape) {
+            return [inputShape[0], this.units];
+        }
+        
+        getConfig() {
+            const config = {
+                units: this.units,
+                activation: this.activation,
+                useBias: this.useBias
+            };
+            const baseConfig = super.getConfig();
+            return Object.assign({}, baseConfig, config);
+        }
+        
+        static get className() {
+            return 'NoisyDense';
+        }
+    }
+    
+    // Register the custom layer
+    tf.serialization.registerClass(NoisyDense);
+    
+    /**
      * Create a Q-network model with dueling DQN architecture.
      * Used for both main model and target model.
      * 
@@ -679,8 +833,8 @@ export function initTraining(context) {
      * - Dense: 256 units, ReLU
      * - Dense: 128 units, ReLU (shared final hidden layer)
      * - Split into two streams:
-     *   - Value stream: Dense 1 unit (V(s))
-     *   - Advantage stream: Dense 4 units (A(s,a))
+     *   - Value stream: NoisyDense 1 unit (V(s))
+     *   - Advantage stream: NoisyDense 4 units (A(s,a))
      * - Combine: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))
      * - Output: 4 units (Q-values for each action)
      * 
@@ -723,19 +877,19 @@ export function initTraining(context) {
         }).apply(hidden);
         
         // Value stream: outputs V(s) - a single scalar value
-        const valueStream = tf.layers.dense({
+        // Using NoisyDense for exploration without epsilon-greedy
+        const valueStream = new NoisyDense({
             units: 1,
             activation: 'linear',
-            kernelInitializer: 'glorotNormal',
-            name: 'value'
+            name: 'noisy_value'
         }).apply(hidden);
         
         // Advantage stream: outputs A(s,a) - one value per action
-        const advantageStream = tf.layers.dense({
+        // Using NoisyDense for exploration without epsilon-greedy
+        const advantageStream = new NoisyDense({
             units: NUM_ACTIONS,
             activation: 'linear',
-            kernelInitializer: 'glorotNormal',
-            name: 'advantage'
+            name: 'noisy_advantage'
         }).apply(hidden);
         
         // Combine streams using dueling formula: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))
@@ -820,7 +974,8 @@ export function initTraining(context) {
         replayBuffer = new ReplayBuffer(DEFAULT_REPLAY_BUFFER_SIZE, STATE_SIZE);
         
         console.log('[Train] Model built and compiled successfully.');
-        console.log('[Train] Architecture: Dueling DQN with 512-512-256-128 hidden layers, Value stream (1 unit), Advantage stream (4 units)');
+        console.log('[Train] Architecture: Dueling DQN with 512-512-256-128 hidden layers, NoisyNet Value stream (1 unit), NoisyNet Advantage stream (4 units)');
+        console.log('[Train] Exploration: NoisyNet with factorized Gaussian noise (replaces epsilon-greedy)');
         console.log('[Train] Dueling aggregation: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a))), batch size: ' + DEFAULT_BATCH_SIZE);
         console.log('[Train] Learning rate decay: ' + LEARNING_RATE_INITIAL + ' → ' + LEARNING_RATE_100 + ' (100 eps) → ' + LEARNING_RATE_200 + ' (200 eps)');
         console.log('[Train] Target model initialized with same weights (hard update).');
@@ -900,20 +1055,18 @@ export function initTraining(context) {
     }
     
     /**
-     * Select action using epsilon-greedy policy with pre-allocated buffer.
+     * Select action using the noisy Q-values.
+     * NoisyNet layers automatically provide exploration through parametric noise,
+     * so we don't need epsilon-greedy exploration.
      * Uses tf.tidy() to prevent memory leaks.
      * 
      * @param {Float32Array} stateBuffer - Pre-allocated state buffer
-     * @param {number} epsilon - Exploration rate (0-1)
+     * @param {number} epsilon - Ignored (kept for API compatibility)
      * @returns {number} Action index (0-3)
      */
     function selectActionFromBuffer(stateBuffer, epsilon) {
-        // Epsilon-greedy: with probability epsilon, choose random action
-        if (epsilon > 0 && Math.random() < epsilon) {
-            return Math.floor(Math.random() * NUM_ACTIONS);
-        }
-        
-        // Otherwise, choose action with highest Q-value (exploitation)
+        // No epsilon-greedy needed - NoisyNet provides exploration via noise
+        // Simply choose action with highest noisy Q-value
         return tf.tidy(() => {
             const stateTensor = tf.tensor2d(stateBuffer, [1, STATE_SIZE]);
             const qValues = model.predict(stateTensor);
@@ -2108,12 +2261,13 @@ export function initTraining(context) {
     };
     
     /**
-     * Select action using epsilon-greedy policy.
+     * Select action using NoisyNet Q-values.
      * This is the public API for action selection.
      * Note: For frame stacking, the caller must maintain frame history and provide stacked state.
+     * Note: epsilon parameter is ignored - NoisyNet provides exploration through parametric noise.
      * 
      * @param {number[]|Float32Array} state - Stacked state vector (465 elements = 155 * 3 frames)
-     * @param {number} [epsilon=0] - Exploration rate (0-1). With probability epsilon, returns random action.
+     * @param {number} [epsilon=0] - Ignored (kept for API compatibility)
      * @returns {number} Action index (0-3)
      */
     window.RL.selectAction = function(state, epsilon = 0) {
@@ -2130,7 +2284,8 @@ export function initTraining(context) {
     console.log('[Train] Optimized training module initialized.');
     console.log('[Train] Use RL.initModel() to build the model, then await RL.train(numEpisodes) to train.');
     console.log('[Train] Both RL.train() and RL.trainAsync() yield to event loop to prevent browser freeze.');
-    console.log('[Train] Model architecture: Dueling DQN with 512-512-256-128 hidden layers, Value stream (1 unit), Advantage stream (4 units).');
+    console.log('[Train] Model architecture: Dueling DQN with 512-512-256-128 hidden layers, NoisyNet Value stream (1 unit), NoisyNet Advantage stream (4 units).');
+    console.log('[Train] Exploration: NoisyNet with factorized Gaussian noise (no epsilon-greedy).');
     console.log('[Train] State representation: Frame stacking with ' + FRAME_STACK_SIZE + ' frames (' + BASE_STATE_SIZE + ' * ' + FRAME_STACK_SIZE + ' = ' + STATE_SIZE + ' elements).');
     console.log('[Train] N-step returns: n=' + N_STEP_RETURNS + ' for multi-step DQN.');
     console.log('[Train] Batch size: ' + DEFAULT_BATCH_SIZE + ', Learning rate decay: 1e-4 → 5e-5 (100 eps) → 3e-5 (200 eps).');
