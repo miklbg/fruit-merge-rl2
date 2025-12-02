@@ -707,8 +707,9 @@ export function initTraining(context) {
             this.inputDim = inputShape[inputShape.length - 1];
             
             // Initialize μ_w and σ_w for weights
-            // Using Xavier/Glorot uniform initialization: μ ~ U(-1/√fan_in, 1/√fan_in)
-            // This is the standard range for weight initialization
+            // Using uniform initialization: μ ~ U(-1/√fan_in, 1/√fan_in)
+            // This is a common simplified initialization (also used in original NoisyNet paper)
+            // Note: This differs from Xavier/Glorot which uses √(6/(fan_in + fan_out))
             const muRange = 1.0 / Math.sqrt(this.inputDim);
             
             this.muWeight = this.addWeight(
@@ -750,20 +751,17 @@ export function initTraining(context) {
          * The noise tensor is kept (not tidied) so it can be stored as instance variable.
          */
         factorizedNoise(size) {
-            const noise = tf.randomNormal([size]);
-            // f(x) = sgn(x) * sqrt(|x|)
-            const sign = tf.sign(noise);
-            const abs = tf.abs(noise);
-            const sqrt = tf.sqrt(abs);
-            const result = tf.mul(sign, sqrt);
-            
-            // Clean up intermediate tensors
-            noise.dispose();
-            sign.dispose();
-            abs.dispose();
-            sqrt.dispose();
-            
-            return result;
+            // Create noise and transform it - wrapped in tidy() for automatic cleanup
+            return tf.tidy(() => {
+                const noise = tf.randomNormal([size]);
+                // f(x) = sgn(x) * sqrt(|x|)
+                const sign = tf.sign(noise);
+                const abs = tf.abs(noise);
+                const sqrt = tf.sqrt(abs);
+                const result = tf.mul(sign, sqrt);
+                // tf.keep() prevents the result from being disposed by tidy()
+                return tf.keep(result);
+            });
         }
         
         /**
@@ -787,42 +785,56 @@ export function initTraining(context) {
         call(inputs, kwargs) {
             // Reset noise OUTSIDE of tf.tidy() to avoid memory management issues
             // The noise tensors are stored as instance variables and managed manually
-            this.resetNoise();
-            
-            return tf.tidy(() => {
-                const input = inputs instanceof Array ? inputs[0] : inputs;
+            // Use try-finally to ensure proper cleanup even if an error occurs
+            try {
+                this.resetNoise();
                 
-                // Compute factorized noise for weights: ε_w = ε_input ⊗ ε_output
-                // This gives us a [inputDim, units] noise matrix
-                const epsilonWeight = tf.outerProduct(this.epsilonInput, this.epsilonOutput);
-                
-                // Compute noisy weights: w = μ_w + σ_w ⊙ ε_w
-                const noisyWeight = tf.add(
-                    this.muWeight.read(),
-                    tf.mul(this.sigmaWeight.read(), epsilonWeight)
-                );
-                
-                // Apply linear transformation: y = x * w
-                let output = tf.matMul(input, noisyWeight);
-                
-                if (this.useBias) {
-                    // Compute noisy bias: b = μ_b + σ_b ⊙ ε_output
-                    const noisyBias = tf.add(
-                        this.muBias.read(),
-                        tf.mul(this.sigmaBias.read(), this.epsilonOutput)
+                return tf.tidy(() => {
+                    const input = inputs instanceof Array ? inputs[0] : inputs;
+                    
+                    // Compute factorized noise for weights: ε_w = ε_input ⊗ ε_output
+                    // This gives us a [inputDim, units] noise matrix
+                    const epsilonWeight = tf.outerProduct(this.epsilonInput, this.epsilonOutput);
+                    
+                    // Compute noisy weights: w = μ_w + σ_w ⊙ ε_w
+                    const noisyWeight = tf.add(
+                        this.muWeight.read(),
+                        tf.mul(this.sigmaWeight.read(), epsilonWeight)
                     );
                     
-                    // Add bias: y = y + b
-                    output = tf.add(output, noisyBias);
+                    // Apply linear transformation: y = x * w
+                    let output = tf.matMul(input, noisyWeight);
+                    
+                    if (this.useBias) {
+                        // Compute noisy bias: b = μ_b + σ_b ⊙ ε_output
+                        const noisyBias = tf.add(
+                            this.muBias.read(),
+                            tf.mul(this.sigmaBias.read(), this.epsilonOutput)
+                        );
+                        
+                        // Add bias: y = y + b
+                        output = tf.add(output, noisyBias);
+                    }
+                    
+                    // Apply activation using pre-created layer (optimization)
+                    if (this.activationLayer) {
+                        output = this.activationLayer.apply(output);
+                    }
+                    
+                    return output;
+                });
+            } catch (error) {
+                // If an error occurs, ensure noise tensors are cleaned up to prevent leaks
+                if (this.epsilonInput) {
+                    this.epsilonInput.dispose();
+                    this.epsilonInput = null;
                 }
-                
-                // Apply activation using pre-created layer (optimization)
-                if (this.activationLayer) {
-                    output = this.activationLayer.apply(output);
+                if (this.epsilonOutput) {
+                    this.epsilonOutput.dispose();
+                    this.epsilonOutput = null;
                 }
-                
-                return output;
-            });
+                throw error;
+            }
         }
         
         computeOutputShape(inputShape) {
