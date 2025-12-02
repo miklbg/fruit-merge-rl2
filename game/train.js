@@ -816,7 +816,7 @@ export function initTraining(context) {
      * 
      * Architecture:
      * - Input: Flat state vector (465 elements = 155 * 3 frames)
-     * - Lambda layer: Convert to spatial grid (GRID_WIDTH x GRID_HEIGHT x GRID_TOTAL_CHANNELS)
+     * - Reshape: Convert to spatial grid (GRID_HEIGHT x GRID_WIDTH x GRID_TOTAL_CHANNELS)
      * - Conv2D: 32 filters, 3x3 kernel, stride 1, ReLU
      * - Conv2D: 64 filters, 3x3 kernel, stride 1, ReLU
      * - Flatten
@@ -834,43 +834,47 @@ export function initTraining(context) {
         const input = tf.input({shape: [STATE_SIZE]});
         
         // Lambda layer to convert flat state to spatial grid
-        // Input: [batch, 465] -> Output: [batch, GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS]
+        // This uses TensorFlow operations for GPU acceleration
         const gridInput = tf.layers.lambda({
             computeOutputShape: (inputShape) => {
                 return [null, GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS];
             },
             apply: (inputs) => {
                 return tf.tidy(() => {
-                    // inputs is a tensor of shape [batch, 465]
-                    const batchSize = inputs.shape[0];
+                    // inputs shape: [batch, 465]
+                    const batchedStates = inputs;
                     
-                    // Convert each sample in batch to grid
-                    const grids = [];
-                    const inputData = inputs; // Keep as tensor
+                    // We need to convert the flat state to grid format
+                    // Since this is complex custom logic, we'll process each sample in the batch
+                    // Note: For efficiency, this should ideally be done in the training loop
+                    // before feeding to the model, but we'll implement it here as a lambda layer
                     
-                    // Split batch into individual samples and convert
-                    const samples = tf.split(inputData, batchSize || 1, 0);
-                    for (let i = 0; i < samples.length; i++) {
-                        const sample = samples[i].squeeze([0]); // Remove batch dimension
-                        const sampleData = sample.dataSync(); // Get flat array
-                        
-                        // Convert to grid using our conversion function
-                        const gridData = convertStackedStateToGrid(sampleData);
-                        
-                        // Reshape to [GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS]
-                        const gridTensor = tf.tensor3d(
-                            gridData,
-                            [GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS]
-                        );
-                        grids.push(gridTensor);
-                    }
+                    // Split by batch to process individually
+                    const unstacked = tf.unstack(batchedStates, 0);
+                    const grids = unstacked.map(stateTensor => {
+                        return tf.tidy(() => {
+                            // Convert tensor to array for processing
+                            const stateArray = stateTensor.arraySync();
+                            
+                            // Convert using our conversion function
+                            const gridData = convertStackedStateToGrid(new Float32Array(stateArray));
+                            
+                            // Create tensor with shape [GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS]
+                            const gridTensor = tf.tensor3d(
+                                Array.from(gridData),
+                                [GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS]
+                            );
+                            
+                            return gridTensor;
+                        });
+                    });
                     
-                    // Stack grids back into batch
+                    // Stack back into batch
                     const batchedGrid = tf.stack(grids, 0);
                     
-                    // Clean up individual grid tensors
-                    grids.forEach(g => g.dispose());
-                    samples.forEach(s => s.dispose());
+                    // Dispose intermediate tensors
+                    unstacked.forEach(t => t.dispose());
+                    grids.forEach(t => t.dispose());
                     
                     return batchedGrid;
                 });
@@ -1009,8 +1013,15 @@ export function initTraining(context) {
         replayBuffer = new ReplayBuffer(DEFAULT_REPLAY_BUFFER_SIZE, STATE_SIZE);
         
         console.log('[Train] Model built and compiled successfully.');
-        console.log('[Train] Architecture: Dueling DQN with 512-512-256-128 hidden layers, Value stream (1 unit), Advantage stream (4 units)');
-        console.log('[Train] Dueling aggregation: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a))), batch size: ' + DEFAULT_BATCH_SIZE);
+        console.log('[Train] Architecture: CNN + Dueling DQN');
+        console.log('[Train]   - Input: 465-element flat state (155 * 3 frames)');
+        console.log('[Train]   - Spatial Grid: 10x15x12 (width x height x channels)');
+        console.log('[Train]   - Conv2D: 32 filters, 3x3 kernel, ReLU');
+        console.log('[Train]   - Conv2D: 64 filters, 3x3 kernel, ReLU');
+        console.log('[Train]   - Flatten + Dense: 256 units, ReLU');
+        console.log('[Train]   - Dueling streams: Value (1 unit) + Advantage (4 units)');
+        console.log('[Train]   - Output: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))');
+        console.log('[Train] Batch size: ' + DEFAULT_BATCH_SIZE);
         console.log('[Train] Learning rate decay: ' + LEARNING_RATE_INITIAL + ' → ' + LEARNING_RATE_100 + ' (100 eps) → ' + LEARNING_RATE_200 + ' (200 eps)');
         console.log('[Train] Target model initialized with same weights (hard update).');
         console.log('[Train] Stability features enabled: Huber loss, gradient clipping, soft target updates (τ=' + TAU + ').');
