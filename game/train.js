@@ -693,6 +693,12 @@ export function initTraining(context) {
             // Noise samples (not trainable, regenerated each forward pass)
             this.epsilonInput = null;
             this.epsilonOutput = null;
+            
+            // Pre-create activation layer if needed (optimization)
+            this.activationLayer = null;
+            if (this.activation !== 'linear') {
+                this.activationLayer = tf.layers.activation({activation: this.activation});
+            }
         }
         
         build(inputShape) {
@@ -739,20 +745,29 @@ export function initTraining(context) {
         /**
          * Generate factorized Gaussian noise using f(x) = sgn(x) * sqrt(|x|)
          * This is the factorization function from the NoisyNet paper.
+         * The noise tensor is kept (not tidied) so it can be stored as instance variable.
          */
         factorizedNoise(size) {
-            return tf.tidy(() => {
-                const noise = tf.randomNormal([size]);
-                // f(x) = sgn(x) * sqrt(|x|)
-                const sign = tf.sign(noise);
-                const abs = tf.abs(noise);
-                const sqrt = tf.sqrt(abs);
-                return tf.mul(sign, sqrt);
-            });
+            const noise = tf.randomNormal([size]);
+            // f(x) = sgn(x) * sqrt(|x|)
+            const sign = tf.sign(noise);
+            const abs = tf.abs(noise);
+            const sqrt = tf.sqrt(abs);
+            const result = tf.mul(sign, sqrt);
+            
+            // Clean up intermediate tensors
+            noise.dispose();
+            sign.dispose();
+            abs.dispose();
+            sqrt.dispose();
+            
+            return result;
         }
         
         /**
-         * Reset noise samples (called at each forward pass)
+         * Reset noise samples (called at each forward pass).
+         * Note: Resetting noise at each forward pass is intentional per NoisyNet paper.
+         * This provides state-dependent exploration.
          */
         resetNoise() {
             // Dispose previous noise tensors if they exist
@@ -771,7 +786,8 @@ export function initTraining(context) {
             return tf.tidy(() => {
                 const input = inputs instanceof Array ? inputs[0] : inputs;
                 
-                // Reset noise for each forward pass
+                // Reset noise for each forward pass (per NoisyNet paper)
+                // This is intentional and provides automatic exploration
                 this.resetNoise();
                 
                 // Compute factorized noise for weights: ε_w = ε_input ⊗ ε_output
@@ -798,10 +814,9 @@ export function initTraining(context) {
                     output = tf.add(output, noisyBias);
                 }
                 
-                // Apply activation
-                if (this.activation !== 'linear') {
-                    const activationFn = tf.layers.activation({activation: this.activation});
-                    output = activationFn.apply(output);
+                // Apply activation using pre-created layer (optimization)
+                if (this.activationLayer) {
+                    output = this.activationLayer.apply(output);
                 }
                 
                 return output;
