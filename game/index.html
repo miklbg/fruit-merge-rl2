@@ -27,11 +27,29 @@
     <!-- Load Matter.js Physics Engine -->
     <script src="matter.min.js"></script>
     
-    <!-- Load TensorFlow.js WebGPU backend FIRST (must be loaded before tf.js) -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu@4.17.0"></script>
-    <!-- Load TensorFlow.js core library -->
+    <!-- Load TensorFlow.js core library FIRST -->
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
-    <!-- Backend initialization now handled in module script before any model creation -->
+    <!-- Load TensorFlow.js WebGPU backend (registers itself with tf.js) -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu@4.17.0"></script>
+    <!-- Immediately set backend to prevent automatic initialization attempts -->
+    <script>
+        // Set the backend immediately after scripts load to prevent auto-initialization errors
+        (async function() {
+            try {
+                // WebGPU backend is now registered, set it before any other tf.js operations
+                await tf.setBackend('webgpu');
+                await tf.ready();
+            } catch (err) {
+                // Fallback will be handled in tfBackendInit.js
+                try {
+                    await tf.setBackend('wasm');
+                    await tf.ready();
+                } catch (wasmErr) {
+                    // Will be handled by tfBackendInit.js
+                }
+            }
+        })();
+    </script>
 
     <!-- Load font -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -563,15 +581,15 @@
         // Import Training module for RL training
         import { initTraining } from './train.js';
         
-        // Initialize TensorFlow.js backend BEFORE any model or tensor creation
-        // This MUST run before window.onload to prevent "Initialization of backend webgpu failed" errors
-        await initTFBackend();
-        
         // Expose global function for console testing
         window.runRandomAgent = (options) => startRandomAgentTest(options);
 
         // Wait for the *entire page* to load
-        window.onload = () => {
+        window.onload = async () => {
+            // Initialize TensorFlow.js backend FIRST, before any model or tensor creation
+            // This prevents "Initialization of backend webgpu failed" errors
+            await initTFBackend();
+            
             
             // --- DOM Elements ---
             const gameContainer = document.getElementById('game-container');
