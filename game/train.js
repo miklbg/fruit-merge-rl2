@@ -405,6 +405,21 @@ export function initTraining(context) {
     const FRAME_STACK_SIZE = 3;   // Number of frames to stack
     const STATE_SIZE = BASE_STATE_SIZE * FRAME_STACK_SIZE;  // 155 * 3 = 465-element stacked state vector
     const NUM_ACTIONS = 4;   // 4 discrete actions (left, right, center, drop)
+    
+    // Spatial grid configuration for CNN
+    const GRID_WIDTH = 10;   // Grid width for spatial representation
+    const GRID_HEIGHT = 15;  // Grid height for spatial representation
+    const GRID_CHANNELS = 4; // Number of channels per frame (board fruits, current fruit, next fruit, booster)
+    const GRID_TOTAL_CHANNELS = GRID_CHANNELS * FRAME_STACK_SIZE; // Total channels with frame stacking (4 * 3 = 12)
+    
+    // CNN architecture configuration
+    const CNN_FILTERS_1 = 32;  // First conv layer filters
+    const CNN_FILTERS_2 = 64;  // Second conv layer filters
+    const CNN_KERNEL_SIZE = 3; // Kernel size for conv layers
+    const CNN_STRIDE = 1;      // Stride for conv layers
+    const CNN_DENSE_UNITS = 256; // Dense layer after CNN
+    
+    // Original dense architecture (kept for reference but not used with CNN)
     const HIDDEN_UNITS_1 = 512; // First hidden layer units
     const HIDDEN_UNITS_2 = 512; // Second hidden layer units
     const HIDDEN_UNITS_3 = 256; // Third hidden layer units
@@ -615,6 +630,133 @@ export function initTraining(context) {
         }
     }
     
+    /**
+     * Convert a single flat state frame (155 elements) to a spatial grid representation.
+     * 
+     * The flat state format is:
+     * - [0]: Current fruit X (0-1)
+     * - [1]: Current fruit Y (0-1)
+     * - [2]: Current fruit level (0-1)
+     * - [3]: Next fruit level (0-1)
+     * - [4]: Booster available (0 or 1)
+     * - [5-154]: Board fruits, 50 fruits * 3 values (x, y, level)
+     * 
+     * The spatial grid is GRID_WIDTH x GRID_HEIGHT x GRID_CHANNELS:
+     * - Channel 0: Board fruits (fruit level at each grid cell, max if multiple fruits)
+     * - Channel 1: Current falling fruit indicator (1.0 where current fruit is located)
+     * - Channel 2: Next fruit level (constant across all cells)
+     * - Channel 3: Booster availability (constant across all cells)
+     * 
+     * @param {Float32Array|number[]} flatState - 155-element flat state
+     * @param {Float32Array} gridBuffer - Output buffer of size GRID_WIDTH * GRID_HEIGHT * GRID_CHANNELS
+     */
+    function convertFlatStateToGrid(flatState, gridBuffer) {
+        // Clear the grid buffer
+        gridBuffer.fill(0);
+        
+        // Extract metadata from flat state
+        const currentX = flatState[0];
+        const currentY = flatState[1];
+        const currentLevel = flatState[2];
+        const nextLevel = flatState[3];
+        const boosterAvailable = flatState[4];
+        
+        // Helper function to convert normalized position to grid indices
+        function posToGridIndex(normX, normY) {
+            const gridX = Math.floor(normX * GRID_WIDTH);
+            const gridY = Math.floor(normY * GRID_HEIGHT);
+            // Clamp to valid range
+            const clampedX = Math.max(0, Math.min(GRID_WIDTH - 1, gridX));
+            const clampedY = Math.max(0, Math.min(GRID_HEIGHT - 1, gridY));
+            return { x: clampedX, y: clampedY };
+        }
+        
+        // Helper function to get flat index in grid buffer
+        function getGridBufferIndex(gridX, gridY, channel) {
+            return (gridY * GRID_WIDTH + gridX) * GRID_CHANNELS + channel;
+        }
+        
+        // Channel 0: Board fruits
+        // Process all board fruits (starting at index 5)
+        for (let i = 5; i < flatState.length; i += 3) {
+            const fruitX = flatState[i];
+            const fruitY = flatState[i + 1];
+            const fruitLevel = flatState[i + 2];
+            
+            // Skip if no fruit at this slot (level is 0)
+            if (fruitLevel === 0) continue;
+            
+            const { x: gridX, y: gridY } = posToGridIndex(fruitX, fruitY);
+            const idx = getGridBufferIndex(gridX, gridY, 0);
+            
+            // Take max fruit level if multiple fruits in same cell
+            gridBuffer[idx] = Math.max(gridBuffer[idx], fruitLevel);
+        }
+        
+        // Channel 1: Current falling fruit
+        if (currentLevel > 0) {
+            const { x: gridX, y: gridY } = posToGridIndex(currentX, currentY);
+            const idx = getGridBufferIndex(gridX, gridY, 1);
+            gridBuffer[idx] = currentLevel;
+        }
+        
+        // Channel 2: Next fruit level (constant across all cells)
+        for (let y = 0; y < GRID_HEIGHT; y++) {
+            for (let x = 0; x < GRID_WIDTH; x++) {
+                const idx = getGridBufferIndex(x, y, 2);
+                gridBuffer[idx] = nextLevel;
+            }
+        }
+        
+        // Channel 3: Booster availability (constant across all cells)
+        for (let y = 0; y < GRID_HEIGHT; y++) {
+            for (let x = 0; x < GRID_WIDTH; x++) {
+                const idx = getGridBufferIndex(x, y, 3);
+                gridBuffer[idx] = boosterAvailable;
+            }
+        }
+    }
+    
+    /**
+     * Convert stacked flat state (3 frames * 155 elements = 465) to stacked spatial grid.
+     * Output shape: GRID_WIDTH x GRID_HEIGHT x (GRID_CHANNELS * FRAME_STACK_SIZE)
+     * 
+     * @param {Float32Array} stackedFlatState - 465-element stacked flat state
+     * @returns {Float32Array} Grid buffer of size GRID_WIDTH * GRID_HEIGHT * GRID_TOTAL_CHANNELS
+     */
+    function convertStackedStateToGrid(stackedFlatState) {
+        const gridSize = GRID_WIDTH * GRID_HEIGHT * GRID_TOTAL_CHANNELS;
+        const stackedGrid = new Float32Array(gridSize);
+        
+        // Temporary buffer for single frame grid conversion
+        const tempGridBuffer = new Float32Array(GRID_WIDTH * GRID_HEIGHT * GRID_CHANNELS);
+        
+        // Convert each frame
+        for (let frameIdx = 0; frameIdx < FRAME_STACK_SIZE; frameIdx++) {
+            // Extract single frame from stacked state
+            const frameOffset = frameIdx * BASE_STATE_SIZE;
+            const singleFrame = stackedFlatState.subarray(frameOffset, frameOffset + BASE_STATE_SIZE);
+            
+            // Convert to grid
+            convertFlatStateToGrid(singleFrame, tempGridBuffer);
+            
+            // Copy to stacked grid with channel offset
+            for (let y = 0; y < GRID_HEIGHT; y++) {
+                for (let x = 0; x < GRID_WIDTH; x++) {
+                    for (let c = 0; c < GRID_CHANNELS; c++) {
+                        const srcIdx = (y * GRID_WIDTH + x) * GRID_CHANNELS + c;
+                        // Stack channels: frame 0 channels 0-3, frame 1 channels 4-7, frame 2 channels 8-11
+                        const dstChannel = frameIdx * GRID_CHANNELS + c;
+                        const dstIdx = (y * GRID_WIDTH + x) * GRID_TOTAL_CHANNELS + dstChannel;
+                        stackedGrid[dstIdx] = tempGridBuffer[srcIdx];
+                    }
+                }
+            }
+        }
+        
+        return stackedGrid;
+    }
+    
     // Replay buffer instance
     let replayBuffer = null;
     
@@ -669,15 +811,16 @@ export function initTraining(context) {
     }
     
     /**
-     * Create a Q-network model with dueling DQN architecture.
+     * Create a Q-network model with CNN + dueling DQN architecture.
      * Used for both main model and target model.
      * 
      * Architecture:
-     * - Input: 465-element stacked state vector (155 * 3 frames)
-     * - Dense: 512 units, ReLU
-     * - Dense: 512 units, ReLU
+     * - Input: Flat state vector (465 elements = 155 * 3 frames)
+     * - Lambda layer: Convert to spatial grid (GRID_WIDTH x GRID_HEIGHT x GRID_TOTAL_CHANNELS)
+     * - Conv2D: 32 filters, 3x3 kernel, stride 1, ReLU
+     * - Conv2D: 64 filters, 3x3 kernel, stride 1, ReLU
+     * - Flatten
      * - Dense: 256 units, ReLU
-     * - Dense: 128 units, ReLU (shared final hidden layer)
      * - Split into two streams:
      *   - Value stream: Dense 1 unit (V(s))
      *   - Advantage stream: Dense 4 units (A(s,a))
@@ -687,39 +830,85 @@ export function initTraining(context) {
      * @returns {tf.LayersModel} The created model
      */
     function createQNetwork() {
-        // Input layer
+        // Input layer - flat stacked state (465 elements)
         const input = tf.input({shape: [STATE_SIZE]});
         
-        // First hidden layer
-        let hidden = tf.layers.dense({
-            units: HIDDEN_UNITS_1,
-            activation: 'relu',
-            kernelInitializer: 'heNormal',
-            name: 'dense_1'
+        // Lambda layer to convert flat state to spatial grid
+        // Input: [batch, 465] -> Output: [batch, GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS]
+        const gridInput = tf.layers.lambda({
+            computeOutputShape: (inputShape) => {
+                return [null, GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS];
+            },
+            apply: (inputs) => {
+                return tf.tidy(() => {
+                    // inputs is a tensor of shape [batch, 465]
+                    const batchSize = inputs.shape[0];
+                    
+                    // Convert each sample in batch to grid
+                    const grids = [];
+                    const inputData = inputs; // Keep as tensor
+                    
+                    // Split batch into individual samples and convert
+                    const samples = tf.split(inputData, batchSize || 1, 0);
+                    for (let i = 0; i < samples.length; i++) {
+                        const sample = samples[i].squeeze([0]); // Remove batch dimension
+                        const sampleData = sample.dataSync(); // Get flat array
+                        
+                        // Convert to grid using our conversion function
+                        const gridData = convertStackedStateToGrid(sampleData);
+                        
+                        // Reshape to [GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS]
+                        const gridTensor = tf.tensor3d(
+                            gridData,
+                            [GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS]
+                        );
+                        grids.push(gridTensor);
+                    }
+                    
+                    // Stack grids back into batch
+                    const batchedGrid = tf.stack(grids, 0);
+                    
+                    // Clean up individual grid tensors
+                    grids.forEach(g => g.dispose());
+                    samples.forEach(s => s.dispose());
+                    
+                    return batchedGrid;
+                });
+            },
+            name: 'state_to_grid'
         }).apply(input);
         
-        // Second hidden layer
-        hidden = tf.layers.dense({
-            units: HIDDEN_UNITS_2,
+        // First convolutional layer
+        let conv = tf.layers.conv2d({
+            filters: CNN_FILTERS_1,
+            kernelSize: CNN_KERNEL_SIZE,
+            strides: CNN_STRIDE,
             activation: 'relu',
             kernelInitializer: 'heNormal',
-            name: 'dense_2'
-        }).apply(hidden);
+            name: 'conv2d_1'
+        }).apply(gridInput);
         
-        // Third hidden layer
-        hidden = tf.layers.dense({
-            units: HIDDEN_UNITS_3,
+        // Second convolutional layer
+        conv = tf.layers.conv2d({
+            filters: CNN_FILTERS_2,
+            kernelSize: CNN_KERNEL_SIZE,
+            strides: CNN_STRIDE,
             activation: 'relu',
             kernelInitializer: 'heNormal',
-            name: 'dense_3'
-        }).apply(hidden);
+            name: 'conv2d_2'
+        }).apply(conv);
         
-        // Fourth hidden layer (shared final hidden layer)
+        // Flatten the convolutional output
+        let hidden = tf.layers.flatten({
+            name: 'flatten'
+        }).apply(conv);
+        
+        // Dense layer after CNN
         hidden = tf.layers.dense({
-            units: HIDDEN_UNITS_4,
+            units: CNN_DENSE_UNITS,
             activation: 'relu',
             kernelInitializer: 'heNormal',
-            name: 'dense_4'
+            name: 'dense_post_cnn'
         }).apply(hidden);
         
         // Value stream: outputs V(s) - a single scalar value
@@ -772,7 +961,7 @@ export function initTraining(context) {
         const network = tf.model({
             inputs: input,
             outputs: output,
-            name: 'dueling_dqn'
+            name: 'cnn_dueling_dqn'
         });
         
         return network;
