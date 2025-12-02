@@ -677,6 +677,8 @@ export function initTraining(context) {
             this.units = config.units;
             this.activation = config.activation || 'linear';
             this.useBias = config.useBias !== undefined ? config.useBias : true;
+            // Configurable noise initialization - standard value from NoisyNet paper
+            this.sigmaInit = config.sigmaInit || 0.017;
             
             // Factorized noise parameters
             // For input dimension p and output dimension q:
@@ -705,9 +707,9 @@ export function initTraining(context) {
             this.inputDim = inputShape[inputShape.length - 1];
             
             // Initialize μ_w and σ_w for weights
-            // Using uniform initialization from original paper
+            // Using Xavier/Glorot uniform initialization: μ ~ U(-1/√fan_in, 1/√fan_in)
+            // This is the standard range for weight initialization
             const muRange = 1.0 / Math.sqrt(this.inputDim);
-            const sigmaInit = 0.017; // Standard value from NoisyNet paper
             
             this.muWeight = this.addWeight(
                 'mu_weight',
@@ -720,7 +722,7 @@ export function initTraining(context) {
                 'sigma_weight',
                 [this.inputDim, this.units],
                 'float32',
-                tf.initializers.constant({value: sigmaInit})
+                tf.initializers.constant({value: this.sigmaInit})
             );
             
             if (this.useBias) {
@@ -735,7 +737,7 @@ export function initTraining(context) {
                     'sigma_bias',
                     [this.units],
                     'float32',
-                    tf.initializers.constant({value: sigmaInit})
+                    tf.initializers.constant({value: this.sigmaInit})
                 );
             }
             
@@ -831,7 +833,8 @@ export function initTraining(context) {
             const config = {
                 units: this.units,
                 activation: this.activation,
-                useBias: this.useBias
+                useBias: this.useBias,
+                sigmaInit: this.sigmaInit
             };
             const baseConfig = super.getConfig();
             return Object.assign({}, baseConfig, config);
@@ -855,8 +858,13 @@ export function initTraining(context) {
         }
     }
     
-    // Register the custom layer
-    tf.serialization.registerClass(NoisyDense);
+    // Register the custom layer (with error handling for re-registration)
+    try {
+        tf.serialization.registerClass(NoisyDense);
+    } catch (e) {
+        // Layer already registered - this can happen during hot reload or multiple script loads
+        console.warn('[Train] NoisyDense layer already registered:', e.message);
+    }
     
     /**
      * Create a Q-network model with dueling DQN architecture.
@@ -1097,10 +1105,15 @@ export function initTraining(context) {
      * Uses tf.tidy() to prevent memory leaks.
      * 
      * @param {Float32Array} stateBuffer - Pre-allocated state buffer
-     * @param {number} epsilon - Ignored (kept for API compatibility)
+     * @param {number} epsilon - Ignored (kept for API compatibility, will log warning if non-zero)
      * @returns {number} Action index (0-3)
      */
     function selectActionFromBuffer(stateBuffer, epsilon) {
+        // Warn if epsilon is provided (deprecated with NoisyNet)
+        if (epsilon > 0) {
+            console.warn('[Train] Epsilon parameter is ignored with NoisyNet. Exploration is handled automatically via noise.');
+        }
+        
         // No epsilon-greedy needed - NoisyNet provides exploration via noise
         // Simply choose action with highest noisy Q-value
         return tf.tidy(() => {
