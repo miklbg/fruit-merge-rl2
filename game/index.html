@@ -27,29 +27,11 @@
     <!-- Load Matter.js Physics Engine -->
     <script src="matter.min.js"></script>
     
-    <!-- Load TensorFlow.js for RL Training -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
-    <!-- Load TensorFlow.js WebGPU backend for better performance -->
+    <!-- Load TensorFlow.js WebGPU backend FIRST (must be loaded before tf.js) -->
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu@4.17.0"></script>
-    <script>
-        // Switch to WebGPU backend if available, otherwise fall back to WebGL
-        (async function() {
-            if (typeof tf !== 'undefined') {
-                try {
-                    // Check if WebGPU is supported
-                    if (navigator.gpu) {
-                        await tf.setBackend('webgpu');
-                        await tf.ready();
-                        console.log('TensorFlow.js using WebGPU backend');
-                    } else {
-                        console.log('WebGPU not supported, using default backend:', tf.getBackend());
-                    }
-                } catch (e) {
-                    console.log('Failed to set WebGPU backend, using default:', tf.getBackend(), e);
-                }
-            }
-        })();
-    </script>
+    <!-- Load TensorFlow.js core library -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+    <!-- Backend initialization now handled in module script before any model creation -->
 
     <!-- Load font -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -566,6 +548,9 @@
     </div>
 
     <script type="module">
+        // Import TensorFlow.js backend initialization (MUST be first)
+        import { initTFBackend } from './tfBackendInit.js';
+        
         // Import Web Audio BGM controller
         import { createBgmController } from './audio/web-audio-bgm.js';
         
@@ -577,6 +562,10 @@
         
         // Import Training module for RL training
         import { initTraining } from './train.js';
+        
+        // Initialize TensorFlow.js backend BEFORE any model or tensor creation
+        // This MUST run before window.onload to prevent "Initialization of backend webgpu failed" errors
+        await initTFBackend();
         
         // Expose global function for console testing
         window.runRandomAgent = (options) => startRandomAgentTest(options);
