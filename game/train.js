@@ -401,7 +401,9 @@ export function initTraining(context) {
     window.RL = window.RL || {};
     
     // Model configuration
-    const STATE_SIZE = 155;  // 155-element state vector
+    const BASE_STATE_SIZE = 155;  // 155-element base state vector
+    const FRAME_STACK_SIZE = 3;   // Number of frames to stack
+    const STATE_SIZE = BASE_STATE_SIZE * FRAME_STACK_SIZE;  // 155 * 3 = 465-element stacked state vector
     const NUM_ACTIONS = 4;   // 4 discrete actions (left, right, center, drop)
     const HIDDEN_UNITS_1 = 512; // First hidden layer units
     const HIDDEN_UNITS_2 = 512; // Second hidden layer units
@@ -419,6 +421,7 @@ export function initTraining(context) {
     const DEFAULT_TRAIN_EVERY_N_STEPS = 2;
     const DEFAULT_TARGET_UPDATE_EVERY = 1; // Update target model every training step (soft updates)
     const USE_SOFT_UPDATE = true; // Use soft updates (Polyak averaging) instead of hard updates
+    const N_STEP_RETURNS = 3; // N-step returns for multi-step DQN
     
     // Epsilon-greedy defaults
     const DEFAULT_EPSILON = 0.1;
@@ -545,8 +548,100 @@ export function initTraining(context) {
     const stateBuffer = new Float32Array(STATE_SIZE);
     const nextStateBuffer = new Float32Array(STATE_SIZE);
     
+    // Frame stacking: keep a history of the last FRAME_STACK_SIZE frames
+    // Each frame is BASE_STATE_SIZE elements
+    const frameHistory = [];
+    for (let i = 0; i < FRAME_STACK_SIZE; i++) {
+        frameHistory.push(new Float32Array(BASE_STATE_SIZE));
+    }
+    let frameHistoryIndex = 0; // Current position in circular buffer
+    
+    /**
+     * Initialize frame history with the given frame (typically at episode start).
+     * Fills all frame slots with the same initial frame.
+     * @param {number[]|Float32Array} frame - Initial frame to fill history with
+     */
+    function initFrameHistory(frame) {
+        for (let i = 0; i < FRAME_STACK_SIZE; i++) {
+            const buffer = frameHistory[i];
+            const len = Math.min(frame.length, BASE_STATE_SIZE);
+            for (let j = 0; j < len; j++) {
+                buffer[j] = frame[j];
+            }
+            // Zero-pad if source is shorter
+            for (let j = len; j < BASE_STATE_SIZE; j++) {
+                buffer[j] = 0;
+            }
+        }
+        frameHistoryIndex = 0;
+    }
+    
+    /**
+     * Add a new frame to the frame history (circular buffer).
+     * @param {number[]|Float32Array} frame - New frame to add
+     */
+    function addFrameToHistory(frame) {
+        const buffer = frameHistory[frameHistoryIndex];
+        const len = Math.min(frame.length, BASE_STATE_SIZE);
+        for (let i = 0; i < len; i++) {
+            buffer[i] = frame[i];
+        }
+        // Zero-pad if source is shorter
+        for (let i = len; i < BASE_STATE_SIZE; i++) {
+            buffer[i] = 0;
+        }
+        frameHistoryIndex = (frameHistoryIndex + 1) % FRAME_STACK_SIZE;
+    }
+    
+    /**
+     * Stack the frame history into a single stacked state buffer.
+     * Frames are stacked in temporal order (oldest to newest).
+     * @param {Float32Array} stackedBuffer - Output buffer to write stacked frames to
+     */
+    function stackFrames(stackedBuffer) {
+        // Stack frames in temporal order: oldest to newest
+        // Current index points to the slot that will be overwritten next,
+        // so the oldest frame is at frameHistoryIndex
+        for (let i = 0; i < FRAME_STACK_SIZE; i++) {
+            const frameIdx = (frameHistoryIndex + i) % FRAME_STACK_SIZE;
+            const frame = frameHistory[frameIdx];
+            const offset = i * BASE_STATE_SIZE;
+            for (let j = 0; j < BASE_STATE_SIZE; j++) {
+                stackedBuffer[offset + j] = frame[j];
+            }
+        }
+    }
+    
     // Replay buffer instance
     let replayBuffer = null;
+    
+    // N-step return buffer: stores (state, action, reward) for the last N steps
+    // Used to compute n-step returns
+    let nStepBuffer = [];
+    
+    /**
+     * Compute n-step return from the n-step buffer.
+     * R_t^n = r_t + γ*r_{t+1} + γ^2*r_{t+2} + ... + γ^{n-1}*r_{t+n-1}
+     * 
+     * @param {number} gamma - Discount factor
+     * @returns {number} N-step cumulative discounted reward
+     */
+    function computeNStepReturn(gamma) {
+        let nStepReturn = 0;
+        let discount = 1;
+        for (let i = 0; i < nStepBuffer.length; i++) {
+            nStepReturn += discount * nStepBuffer[i].reward;
+            discount *= gamma;
+        }
+        return nStepReturn;
+    }
+    
+    /**
+     * Clear the n-step buffer (at episode boundaries).
+     */
+    function clearNStepBuffer() {
+        nStepBuffer = [];
+    }
     
     /**
      * Copy state array into a Float32Array buffer.
@@ -570,7 +665,7 @@ export function initTraining(context) {
      * Used for both main model and target model.
      * 
      * Architecture:
-     * - Input: 155-element state vector
+     * - Input: 465-element stacked state vector (155 * 3 frames)
      * - Dense: 512 units, ReLU
      * - Dense: 512 units, ReLU
      * - Dense: 256 units, ReLU
@@ -1178,10 +1273,14 @@ export function initTraining(context) {
                 let totalStepPenalty = 0;
                 let totalGameOverPenalty = 0;
                 
-                // Get initial state and encode into buffer
+                // Get initial state and initialize frame history with it
                 const rawState = window.RL.getState();
-                encodeStateIntoBuffer(rawState, stateBuffer);
+                initFrameHistory(rawState);
+                stackFrames(stateBuffer);
                 previousScore = gameContext.getScore();
+                
+                // Clear n-step buffer for new episode
+                clearNStepBuffer();
                 
                 // Track when buffer has enough samples for training (optimization to avoid repeated size() calls)
                 let canTrain = replayBuffer.size() >= validMinBufferSize;
@@ -1207,11 +1306,18 @@ export function initTraining(context) {
                     
                     // Get next state and check if terminal
                     const rawNextState = window.RL.getState();
-                    encodeStateIntoBuffer(rawNextState, nextStateBuffer);
+                    addFrameToHistory(rawNextState);
+                    stackFrames(nextStateBuffer);
                     const done = window.RL.isTerminal();
                     
-                    // Get max fruit level from state for reward shaping
-                    const currentMaxFruit = getMaxFruitLevelFromState(nextStateBuffer);
+                    // For max fruit level, we need to extract from the raw state (not stacked)
+                    // Create a temporary buffer for the single frame
+                    const tempSingleFrameBuffer = new Float32Array(BASE_STATE_SIZE);
+                    const len = Math.min(rawNextState.length, BASE_STATE_SIZE);
+                    for (let i = 0; i < len; i++) {
+                        tempSingleFrameBuffer[i] = rawNextState[i];
+                    }
+                    const currentMaxFruit = getMaxFruitLevelFromState(tempSingleFrameBuffer);
                     
                     // Compute shaped reward (never zero) - action 3 is drop
                     const wasDrop = action === 3;
@@ -1225,8 +1331,35 @@ export function initTraining(context) {
                     totalStepPenalty += components.stepPenalty;
                     totalGameOverPenalty += components.gameOver;
                     
-                    // Store transition in replay buffer with shaped reward
-                    replayBuffer.add(stateBuffer, action, shapedReward, nextStateBuffer, done);
+                    // Add transition to n-step buffer
+                    nStepBuffer.push({
+                        state: new Float32Array(stateBuffer),
+                        action: action,
+                        reward: shapedReward
+                    });
+                    
+                    // If we have N_STEP_RETURNS transitions or episode ended, add to replay buffer
+                    if (nStepBuffer.length >= N_STEP_RETURNS || done) {
+                        const nStepReturn = computeNStepReturn(validGamma);
+                        const firstTransition = nStepBuffer[0];
+                        
+                        // Store transition in replay buffer with n-step return
+                        // Use the state from N steps ago, action from N steps ago, n-step return, and current next state
+                        replayBuffer.add(firstTransition.state, firstTransition.action, nStepReturn, nextStateBuffer, done);
+                        
+                        // Remove the oldest transition from n-step buffer (sliding window)
+                        nStepBuffer.shift();
+                    }
+                    
+                    // If episode ended, flush remaining transitions in n-step buffer
+                    if (done) {
+                        while (nStepBuffer.length > 0) {
+                            const nStepReturn = computeNStepReturn(validGamma);
+                            const firstTransition = nStepBuffer[0];
+                            replayBuffer.add(firstTransition.state, firstTransition.action, nStepReturn, nextStateBuffer, done);
+                            nStepBuffer.shift();
+                        }
+                    }
                     
                     // Update canTrain flag if we just crossed the threshold
                     if (!canTrain && replayBuffer.size() >= validMinBufferSize) {
@@ -1524,8 +1657,12 @@ export function initTraining(context) {
                 let totalGameOverPenalty = 0;
                 
                 const rawState = window.RL.getState();
-                encodeStateIntoBuffer(rawState, stateBuffer);
+                initFrameHistory(rawState);
+                stackFrames(stateBuffer);
                 previousScore = gameContext.getScore();
+                
+                // Clear n-step buffer for new episode
+                clearNStepBuffer();
                 
                 // Track when buffer has enough samples for training (optimization to avoid repeated size() calls)
                 let canTrain = replayBuffer.size() >= validMinBufferSize;
@@ -1544,11 +1681,18 @@ export function initTraining(context) {
                     
                     // Get next state and check if terminal
                     const rawNextState = window.RL.getState();
-                    encodeStateIntoBuffer(rawNextState, nextStateBuffer);
+                    addFrameToHistory(rawNextState);
+                    stackFrames(nextStateBuffer);
                     const done = window.RL.isTerminal();
                     
-                    // Get max fruit level from state for reward shaping
-                    const currentMaxFruit = getMaxFruitLevelFromState(nextStateBuffer);
+                    // For max fruit level, we need to extract from the raw state (not stacked)
+                    // Create a temporary buffer for the single frame
+                    const tempSingleFrameBuffer = new Float32Array(BASE_STATE_SIZE);
+                    const len = Math.min(rawNextState.length, BASE_STATE_SIZE);
+                    for (let i = 0; i < len; i++) {
+                        tempSingleFrameBuffer[i] = rawNextState[i];
+                    }
+                    const currentMaxFruit = getMaxFruitLevelFromState(tempSingleFrameBuffer);
                     
                     // Compute shaped reward (never zero) - action 3 is drop
                     const wasDrop = action === 3;
@@ -1562,8 +1706,35 @@ export function initTraining(context) {
                     totalStepPenalty += components.stepPenalty;
                     totalGameOverPenalty += components.gameOver;
                     
-                    // Store transition with shaped reward
-                    replayBuffer.add(stateBuffer, action, shapedReward, nextStateBuffer, done);
+                    // Add transition to n-step buffer
+                    nStepBuffer.push({
+                        state: new Float32Array(stateBuffer),
+                        action: action,
+                        reward: shapedReward
+                    });
+                    
+                    // If we have N_STEP_RETURNS transitions or episode ended, add to replay buffer
+                    if (nStepBuffer.length >= N_STEP_RETURNS || done) {
+                        const nStepReturn = computeNStepReturn(validGamma);
+                        const firstTransition = nStepBuffer[0];
+                        
+                        // Store transition in replay buffer with n-step return
+                        // Use the state from N steps ago, action from N steps ago, n-step return, and current next state
+                        replayBuffer.add(firstTransition.state, firstTransition.action, nStepReturn, nextStateBuffer, done);
+                        
+                        // Remove the oldest transition from n-step buffer (sliding window)
+                        nStepBuffer.shift();
+                    }
+                    
+                    // If episode ended, flush remaining transitions in n-step buffer
+                    if (done) {
+                        while (nStepBuffer.length > 0) {
+                            const nStepReturn = computeNStepReturn(validGamma);
+                            const firstTransition = nStepBuffer[0];
+                            replayBuffer.add(firstTransition.state, firstTransition.action, nStepReturn, nextStateBuffer, done);
+                            nStepBuffer.shift();
+                        }
+                    }
                     
                     // Update canTrain flag if we just crossed the threshold
                     if (!canTrain && replayBuffer.size() >= validMinBufferSize) {
@@ -1840,8 +2011,9 @@ export function initTraining(context) {
     /**
      * Select action using epsilon-greedy policy.
      * This is the public API for action selection.
+     * Note: For frame stacking, the caller must maintain frame history and provide stacked state.
      * 
-     * @param {number[]|Float32Array} state - State vector (155 elements)
+     * @param {number[]|Float32Array} state - Stacked state vector (465 elements = 155 * 3 frames)
      * @param {number} [epsilon=0] - Exploration rate (0-1). With probability epsilon, returns random action.
      * @returns {number} Action index (0-3)
      */
@@ -1860,7 +2032,10 @@ export function initTraining(context) {
     console.log('[Train] Use RL.initModel() to build the model, then await RL.train(numEpisodes) to train.');
     console.log('[Train] Both RL.train() and RL.trainAsync() yield to event loop to prevent browser freeze.');
     console.log('[Train] Model architecture: 512-512-256-128 hidden layers with 4 output units.');
+    console.log('[Train] State representation: Frame stacking with ' + FRAME_STACK_SIZE + ' frames (' + BASE_STATE_SIZE + ' * ' + FRAME_STACK_SIZE + ' = ' + STATE_SIZE + ' elements).');
+    console.log('[Train] N-step returns: n=' + N_STEP_RETURNS + ' for multi-step DQN.');
     console.log('[Train] Batch size: ' + DEFAULT_BATCH_SIZE + ', Learning rate decay: 1e-4 → 5e-5 (100 eps) → 3e-5 (200 eps).');
+    console.log('[Train] Training frequency: every ' + DEFAULT_TRAIN_EVERY_N_STEPS + ' steps.');
     console.log('[Train] Features: Double DQN, rank-based prioritized replay (α=' + PRIORITY_ALPHA + ', β annealed ' + PRIORITY_BETA_START + '→' + PRIORITY_BETA_END + '), reward shaping.');
     console.log('[Train] Stability: Huber loss (δ=' + HUBER_DELTA + '), gradient clipping (max=' + GRADIENT_CLIP_NORM + '), soft target updates (τ=' + TAU + ').');
     console.log('[Train] Reward shaping (normalized): +' + REWARD_MERGE + ' merge, +' + REWARD_LARGE_FRUIT + ' large fruit, +' + REWARD_FRUIT_DROP + ' fruit drop, ' + REWARD_STEP_PENALTY + ' step penalty, ' + REWARD_GAME_OVER + ' game over.');
