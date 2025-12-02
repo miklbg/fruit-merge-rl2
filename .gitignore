@@ -14,3 +14,4 @@ Thumbs.db
 
 # Test files
 game/test_*.html
+test_noisynet.html

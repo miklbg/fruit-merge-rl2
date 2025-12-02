@@ -6,7 +6,7 @@
  * - Batched predictions for action selection and Q-target computation
  * - Fixed-size ring buffer replay with O(1) add and sample operations
  * - Target network for stable Q-learning (soft updates with τ parameter)
- * - Epsilon-greedy exploration with dynamic decay
+ * - NoisyNet exploration with factorized Gaussian noise (replaces epsilon-greedy)
  * - Batched gradient updates using tf.variableGrads() and optimizer.applyGradients()
  * - tf.tidy() wrapping for automatic memory management
  * - Async training loop with periodic yields (prevents browser freeze)
@@ -24,18 +24,13 @@
  *   RL.initModel();                        // Build and compile main + target models
  *   await RL.train(5);                     // Run 5 episodes of training
  *   await RL.train(5, { batchSize: 64 });  // Use batch size of 64
- *   await RL.train(5, { epsilon: 0.1 });   // Use 10% fixed exploration
- *   await RL.train(5, {                    // Use dynamic epsilon decay
- *     epsilonStart: 1.0,
- *     epsilonEnd: 0.01,
- *     epsilonDecay: 0.995
- *   });
+ *   // Note: epsilon parameters are ignored - NoisyNet provides exploration
  * 
  * API:
- *   RL.initModel()           - Build main and target models
+ *   RL.initModel()           - Build main and target models with NoisyNet layers
  *   RL.train(n, opts)        - Train for n episodes
  *   RL.trainAsync(n, opts)   - Same as train, for UI compatibility
- *   RL.selectAction(s, eps)  - Select action using epsilon-greedy policy
+ *   RL.selectAction(s)       - Select action using noisy Q-values (epsilon ignored)
  *   RL.updateTargetModel()   - Copy weights from main to target model (soft update)
  *   RL.getReplayBuffer()     - Get the replay buffer instance
  *   RL.clearReplayBuffer()   - Clear the replay buffer
@@ -417,9 +412,9 @@ export function initTraining(context) {
     const CNN_FILTERS_2 = 64;  // Second conv layer filters
     const CNN_KERNEL_SIZE = 3; // Kernel size for conv layers
     const CNN_STRIDE = 1;      // Stride for conv layers
-    const CNN_DENSE_UNITS = 256; // Dense layer after CNN
+    const CNN_DENSE_UNITS = 256; // Dense layer after CNN (replaces dense layers 1-4)
     
-    // Original dense architecture (kept for reference but not used with CNN)
+    // Original dense architecture (not used with CNN)
     const HIDDEN_UNITS_1 = 512; // First hidden layer units
     const HIDDEN_UNITS_2 = 512; // Second hidden layer units
     const HIDDEN_UNITS_3 = 256; // Third hidden layer units
@@ -456,7 +451,10 @@ export function initTraining(context) {
     const REWARD_STEP_PENALTY = -0.001; // -0.001 penalty per step to encourage faster play
     const REWARD_FRUIT_DROP = 0.01;     // +0.01 for each fruit dropped
     const REWARD_GAME_OVER = -1.0;      // -1 on game over (normalized)
+    const REWARD_TIME_WASTING_PENALTY = -0.01; // -0.01 penalty per step after 5 seconds without drop
     const LARGE_FRUIT_THRESHOLD = 6;    // Fruit level 6 or higher is considered "large"
+    const TIME_WASTING_PENALTY_STEPS = 300; // 5 seconds at 60 FPS
+    const FORCED_DROP_STEPS = 600; // 10 seconds at 60 FPS
     
     // Model references
     let model = null;
@@ -474,24 +472,27 @@ export function initTraining(context) {
      * Never returns zero - always applies at least the step penalty.
      * 
      * Reward components:
-     * - +1 for every fruit merge (detected via score increase)
-     * - +5 for creating a large/rare fruit (level >= 5)
-     * - +1 for each fruit dropped
-     * - -0.01 step penalty to encourage faster play
-     * - -10 on game over
+     * - +0.1 for every fruit merge (detected via score increase)
+     * - +0.5 for creating a large/rare fruit (level >= 6)
+     * - +0.01 for each fruit dropped
+     * - -0.001 step penalty to encourage faster play
+     * - -0.01 time-wasting penalty per step after 5 seconds without drop
+     * - -1.0 on game over
      * 
      * @param {number} scoreDelta - Change in score since last step
      * @param {number} currentMaxFruit - Current maximum fruit level on board
      * @param {boolean} isGameOver - Whether the game just ended
      * @param {boolean} wasDrop - Whether the action was a fruit drop (action 3)
-     * @returns {{shapedReward: number, components: {merge: number, largeFruit: number, fruitDrop: number, stepPenalty: number, gameOver: number}}}
+     * @param {number} stepsSinceLastDrop - Number of steps since last fruit drop
+     * @returns {{shapedReward: number, components: {merge: number, largeFruit: number, fruitDrop: number, stepPenalty: number, timeWastingPenalty: number, gameOver: number}}}
      */
-    function computeShapedReward(scoreDelta, currentMaxFruit, isGameOver, wasDrop) {
+    function computeShapedReward(scoreDelta, currentMaxFruit, isGameOver, wasDrop, stepsSinceLastDrop) {
         const components = {
             merge: 0,
             largeFruit: 0,
             fruitDrop: 0,
             stepPenalty: REWARD_STEP_PENALTY, // Always apply step penalty (negative value)
+            timeWastingPenalty: 0,
             gameOver: 0
         };
         
@@ -510,6 +511,11 @@ export function initTraining(context) {
             components.fruitDrop = REWARD_FRUIT_DROP;
         }
         
+        // Time-wasting penalty: apply if agent hasn't dropped a fruit for more than 5 seconds
+        if (stepsSinceLastDrop > TIME_WASTING_PENALTY_STEPS) {
+            components.timeWastingPenalty = REWARD_TIME_WASTING_PENALTY;
+        }
+        
         // Game over penalty
         if (isGameOver) {
             components.gameOver = REWARD_GAME_OVER;
@@ -519,7 +525,7 @@ export function initTraining(context) {
         previousMaxFruitLevel = currentMaxFruit;
         
         // Total shaped reward - at minimum we have the negative step penalty
-        const shapedReward = components.merge + components.largeFruit + components.fruitDrop + components.stepPenalty + components.gameOver;
+        const shapedReward = components.merge + components.largeFruit + components.fruitDrop + components.stepPenalty + components.timeWastingPenalty + components.gameOver;
         
         return { shapedReward, components };
     }
@@ -627,6 +633,59 @@ export function initTraining(context) {
             for (let j = 0; j < BASE_STATE_SIZE; j++) {
                 stackedBuffer[offset + j] = frame[j];
             }
+        }
+    }
+    
+    // Replay buffer instance
+    let replayBuffer = null;
+    
+    // N-step return buffer: stores (state, action, reward) for the last N steps
+    // Used to compute n-step returns
+    let nStepBuffer = [];
+    
+    /**
+     * Compute n-step return from the n-step buffer.
+     * For terminal transitions, just sum discounted rewards.
+     * For non-terminal, the bootstrapped Q-value will be added during training via the target model.
+     * R_t^n = r_t + γ*r_{t+1} + ... + γ^{n-1}*r_{t+n-1} (+ γ^n * Q(s_{t+n}, a*) if not done)
+     * 
+     * Note: The Q-value bootstrapping is handled by the training function using the next state,
+     * so this function only computes the cumulative discounted reward portion.
+     * 
+     * @param {number} gamma - Discount factor
+     * @returns {number} N-step cumulative discounted reward
+     */
+    function computeNStepReturn(gamma) {
+        let nStepReturn = 0;
+        let discount = 1;
+        for (let i = 0; i < nStepBuffer.length; i++) {
+            nStepReturn += discount * nStepBuffer[i].reward;
+            discount *= gamma;
+        }
+        return nStepReturn;
+    }
+    
+    /**
+     * Clear the n-step buffer (at episode boundaries).
+     */
+    function clearNStepBuffer() {
+        nStepBuffer = [];
+    }
+    
+    /**
+     * Copy state array into a Float32Array buffer.
+     * Avoids creating new arrays on every step.
+     * @param {number[]} state - Source state array
+     * @param {Float32Array} buffer - Destination buffer
+     */
+    function encodeStateIntoBuffer(state, buffer) {
+        const len = Math.min(state.length, buffer.length);
+        for (let i = 0; i < len; i++) {
+            buffer[i] = state[i];
+        }
+        // Zero-pad if source is shorter
+        for (let i = len; i < buffer.length; i++) {
+            buffer[i] = 0;
         }
     }
     
@@ -759,59 +818,6 @@ export function initTraining(context) {
         return stackedGrid;
     }
     
-    // Replay buffer instance
-    let replayBuffer = null;
-    
-    // N-step return buffer: stores (state, action, reward) for the last N steps
-    // Used to compute n-step returns
-    let nStepBuffer = [];
-    
-    /**
-     * Compute n-step return from the n-step buffer.
-     * For terminal transitions, just sum discounted rewards.
-     * For non-terminal, the bootstrapped Q-value will be added during training via the target model.
-     * R_t^n = r_t + γ*r_{t+1} + ... + γ^{n-1}*r_{t+n-1} (+ γ^n * Q(s_{t+n}, a*) if not done)
-     * 
-     * Note: The Q-value bootstrapping is handled by the training function using the next state,
-     * so this function only computes the cumulative discounted reward portion.
-     * 
-     * @param {number} gamma - Discount factor
-     * @returns {number} N-step cumulative discounted reward
-     */
-    function computeNStepReturn(gamma) {
-        let nStepReturn = 0;
-        let discount = 1;
-        for (let i = 0; i < nStepBuffer.length; i++) {
-            nStepReturn += discount * nStepBuffer[i].reward;
-            discount *= gamma;
-        }
-        return nStepReturn;
-    }
-    
-    /**
-     * Clear the n-step buffer (at episode boundaries).
-     */
-    function clearNStepBuffer() {
-        nStepBuffer = [];
-    }
-    
-    /**
-     * Copy state array into a Float32Array buffer.
-     * Avoids creating new arrays on every step.
-     * @param {number[]} state - Source state array
-     * @param {Float32Array} buffer - Destination buffer
-     */
-    function encodeStateIntoBuffer(state, buffer) {
-        const len = Math.min(state.length, buffer.length);
-        for (let i = 0; i < len; i++) {
-            buffer[i] = state[i];
-        }
-        // Zero-pad if source is shorter
-        for (let i = len; i < buffer.length; i++) {
-            buffer[i] = 0;
-        }
-    }
-    
     /**
      * Convert a batch of flat states to grid tensor for GPU-accelerated processing.
      * This function runs on the CPU but allows the model to run fully on GPU.
@@ -853,7 +859,222 @@ export function initTraining(context) {
     }
     
     /**
-     * Create a Q-network model with CNN + dueling DQN architecture.
+     * Custom NoisyDense layer using factorized Gaussian noise.
+     * Implements the NoisyNet formula: y = (μ_w + σ_w ⊙ ε_w) x + (μ_b + σ_b ⊙ ε_b)
+     * 
+     * Noise is reset at each forward pass for exploration.
+     * 
+     * @class NoisyDense
+     */
+    class NoisyDense extends tf.layers.Layer {
+        constructor(config) {
+            super(config);
+            this.units = config.units;
+            this.activation = config.activation || 'linear';
+            this.useBias = config.useBias !== undefined ? config.useBias : true;
+            // Configurable noise initialization - standard value from NoisyNet paper
+            this.sigmaInit = config.sigmaInit || 0.017;
+            
+            // Factorized noise parameters
+            // For input dimension p and output dimension q:
+            // We use factorized noise: ε_w = f(ε_i) ⊗ f(ε_j)
+            // This reduces noise parameters from p*q to p+q
+            this.inputDim = null; // Set in build()
+            
+            // Trainable parameters
+            this.muWeight = null;
+            this.sigmaWeight = null;
+            this.muBias = null;
+            this.sigmaBias = null;
+            
+            // Noise samples (not trainable, regenerated each forward pass)
+            this.epsilonInput = null;
+            this.epsilonOutput = null;
+            
+            // Pre-create activation layer if needed (optimization)
+            this.activationLayer = null;
+            if (this.activation !== 'linear') {
+                this.activationLayer = tf.layers.activation({activation: this.activation});
+            }
+        }
+        
+        build(inputShape) {
+            this.inputDim = inputShape[inputShape.length - 1];
+            
+            // Initialize μ_w and σ_w for weights
+            // Using uniform initialization: μ ~ U(-1/√fan_in, 1/√fan_in)
+            // This is a common simplified initialization (also used in original NoisyNet paper)
+            // Note: This differs from Xavier/Glorot which uses √(6/(fan_in + fan_out))
+            const muRange = 1.0 / Math.sqrt(this.inputDim);
+            
+            this.muWeight = this.addWeight(
+                'mu_weight',
+                [this.inputDim, this.units],
+                'float32',
+                tf.initializers.randomUniform({minval: -muRange, maxval: muRange})
+            );
+            
+            this.sigmaWeight = this.addWeight(
+                'sigma_weight',
+                [this.inputDim, this.units],
+                'float32',
+                tf.initializers.constant({value: this.sigmaInit})
+            );
+            
+            if (this.useBias) {
+                this.muBias = this.addWeight(
+                    'mu_bias',
+                    [this.units],
+                    'float32',
+                    tf.initializers.randomUniform({minval: -muRange, maxval: muRange})
+                );
+                
+                this.sigmaBias = this.addWeight(
+                    'sigma_bias',
+                    [this.units],
+                    'float32',
+                    tf.initializers.constant({value: this.sigmaInit})
+                );
+            }
+            
+            super.build(inputShape);
+        }
+        
+        /**
+         * Generate factorized Gaussian noise using f(x) = sgn(x) * sqrt(|x|)
+         * This is the factorization function from the NoisyNet paper.
+         * The noise tensor is kept (not tidied) so it can be stored as instance variable.
+         */
+        factorizedNoise(size) {
+            // Create noise and transform it - wrapped in tidy() for automatic cleanup
+            return tf.tidy(() => {
+                const noise = tf.randomNormal([size]);
+                // f(x) = sgn(x) * sqrt(|x|)
+                const sign = tf.sign(noise);
+                const abs = tf.abs(noise);
+                const sqrt = tf.sqrt(abs);
+                const result = tf.mul(sign, sqrt);
+                // tf.keep() prevents the result from being disposed by tidy()
+                return tf.keep(result);
+            });
+        }
+        
+        /**
+         * Reset noise samples (called at each forward pass).
+         * Note: Resetting noise at each forward pass is intentional per NoisyNet paper.
+         * This provides state-dependent exploration.
+         */
+        resetNoise() {
+            // Dispose previous noise tensors if they exist
+            if (this.epsilonInput) {
+                this.epsilonInput.dispose();
+            }
+            if (this.epsilonOutput) {
+                this.epsilonOutput.dispose();
+            }
+            
+            this.epsilonInput = this.factorizedNoise(this.inputDim);
+            this.epsilonOutput = this.factorizedNoise(this.units);
+        }
+        
+        call(inputs, kwargs) {
+            // Reset noise OUTSIDE of tf.tidy() to avoid memory management issues
+            // The noise tensors are stored as instance variables and managed manually
+            // Use try-finally to ensure proper cleanup even if an error occurs
+            try {
+                this.resetNoise();
+                
+                return tf.tidy(() => {
+                    const input = inputs instanceof Array ? inputs[0] : inputs;
+                    
+                    // Compute factorized noise for weights: ε_w = ε_input ⊗ ε_output
+                    // This gives us a [inputDim, units] noise matrix
+                    const epsilonWeight = tf.outerProduct(this.epsilonInput, this.epsilonOutput);
+                    
+                    // Compute noisy weights: w = μ_w + σ_w ⊙ ε_w
+                    const noisyWeight = tf.add(
+                        this.muWeight.read(),
+                        tf.mul(this.sigmaWeight.read(), epsilonWeight)
+                    );
+                    
+                    // Apply linear transformation: y = x * w
+                    let output = tf.matMul(input, noisyWeight);
+                    
+                    if (this.useBias) {
+                        // Compute noisy bias: b = μ_b + σ_b ⊙ ε_output
+                        const noisyBias = tf.add(
+                            this.muBias.read(),
+                            tf.mul(this.sigmaBias.read(), this.epsilonOutput)
+                        );
+                        
+                        // Add bias: y = y + b
+                        output = tf.add(output, noisyBias);
+                    }
+                    
+                    // Apply activation using pre-created layer (optimization)
+                    if (this.activationLayer) {
+                        output = this.activationLayer.apply(output);
+                    }
+                    
+                    return output;
+                });
+            } catch (error) {
+                // If an error occurs, ensure noise tensors are cleaned up to prevent leaks
+                if (this.epsilonInput) {
+                    this.epsilonInput.dispose();
+                    this.epsilonInput = null;
+                }
+                if (this.epsilonOutput) {
+                    this.epsilonOutput.dispose();
+                    this.epsilonOutput = null;
+                }
+                throw error;
+            }
+        }
+        
+        computeOutputShape(inputShape) {
+            return [inputShape[0], this.units];
+        }
+        
+        getConfig() {
+            const config = {
+                units: this.units,
+                activation: this.activation,
+                useBias: this.useBias,
+                sigmaInit: this.sigmaInit
+            };
+            const baseConfig = super.getConfig();
+            return Object.assign({}, baseConfig, config);
+        }
+        
+        dispose() {
+            // Clean up noise tensors
+            if (this.epsilonInput) {
+                this.epsilonInput.dispose();
+                this.epsilonInput = null;
+            }
+            if (this.epsilonOutput) {
+                this.epsilonOutput.dispose();
+                this.epsilonOutput = null;
+            }
+            return super.dispose();
+        }
+        
+        static get className() {
+            return 'NoisyDense';
+        }
+    }
+    
+    // Register the custom layer (with error handling for re-registration)
+    try {
+        tf.serialization.registerClass(NoisyDense);
+    } catch (e) {
+        // Layer already registered - this can happen during hot reload or multiple script loads
+        console.warn('[Train] NoisyDense layer already registered:', e.message);
+    }
+    
+    /**
+     * Create a Q-network model with CNN + NoisyNet + Dueling DQN architecture.
      * Used for both main model and target model.
      * 
      * Architecture:
@@ -863,8 +1084,8 @@ export function initTraining(context) {
      * - Flatten
      * - Dense: 256 units, ReLU
      * - Split into two streams:
-     *   - Value stream: Dense 1 unit (V(s))
-     *   - Advantage stream: Dense 4 units (A(s,a))
+     *   - Value stream: NoisyDense 1 unit (V(s))
+     *   - Advantage stream: NoisyDense 4 units (A(s,a))
      * - Combine: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))
      * - Output: 4 units (Q-values for each action)
      * 
@@ -911,19 +1132,19 @@ export function initTraining(context) {
         }).apply(hidden);
         
         // Value stream: outputs V(s) - a single scalar value
-        const valueStream = tf.layers.dense({
+        // Using NoisyDense for exploration without epsilon-greedy
+        const valueStream = new NoisyDense({
             units: 1,
             activation: 'linear',
-            kernelInitializer: 'glorotNormal',
-            name: 'value'
+            name: 'noisy_value'
         }).apply(hidden);
         
         // Advantage stream: outputs A(s,a) - one value per action
-        const advantageStream = tf.layers.dense({
+        // Using NoisyDense for exploration without epsilon-greedy
+        const advantageStream = new NoisyDense({
             units: NUM_ACTIONS,
             activation: 'linear',
-            kernelInitializer: 'glorotNormal',
-            name: 'advantage'
+            name: 'noisy_advantage'
         }).apply(hidden);
         
         // Combine streams using dueling formula: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))
@@ -960,7 +1181,7 @@ export function initTraining(context) {
         const network = tf.model({
             inputs: input,
             outputs: output,
-            name: 'cnn_dueling_dqn'
+            name: 'cnn_noisynet_dueling_dqn'
         });
         
         return network;
@@ -1008,13 +1229,14 @@ export function initTraining(context) {
         replayBuffer = new ReplayBuffer(DEFAULT_REPLAY_BUFFER_SIZE, STATE_SIZE);
         
         console.log('[Train] Model built and compiled successfully.');
-        console.log('[Train] Architecture: CNN + Dueling DQN (GPU-accelerated)');
+        console.log('[Train] Architecture: CNN + NoisyNet + Dueling DQN (GPU-accelerated)');
         console.log('[Train]   - Input: Spatial grid tensor (15x10x12) - preprocessed from 465-element flat state');
         console.log('[Train]   - Conv2D: 32 filters, 3x3 kernel, ReLU');
         console.log('[Train]   - Conv2D: 64 filters, 3x3 kernel, ReLU');
         console.log('[Train]   - Flatten + Dense: 256 units, ReLU');
-        console.log('[Train]   - Dueling streams: Value (1 unit) + Advantage (4 units)');
+        console.log('[Train]   - Dueling streams: NoisyNet Value (1 unit) + NoisyNet Advantage (4 units)');
         console.log('[Train]   - Output: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))');
+        console.log('[Train] Exploration: NoisyNet with factorized Gaussian noise (no epsilon-greedy)');
         console.log('[Train] Preprocessing: States converted to grids before model input (CPU)');
         console.log('[Train] Processing: Full GPU acceleration from Conv2D through output');
         console.log('[Train] Batch size: ' + DEFAULT_BATCH_SIZE);
@@ -1098,21 +1320,24 @@ export function initTraining(context) {
     }
     
     /**
-     * Select action using epsilon-greedy policy with pre-allocated buffer.
+     * Select action using the noisy Q-values.
+     * NoisyNet layers automatically provide exploration through parametric noise,
+     * so we don't need epsilon-greedy exploration.
      * Uses tf.tidy() to prevent memory leaks.
      * Converts flat state to grid format for GPU-accelerated CNN processing.
      * 
      * @param {Float32Array} stateBuffer - Pre-allocated state buffer
-     * @param {number} epsilon - Exploration rate (0-1)
+     * @param {number} epsilon - Ignored (kept for API compatibility, will log warning if non-zero)
      * @returns {number} Action index (0-3)
      */
     function selectActionFromBuffer(stateBuffer, epsilon) {
-        // Epsilon-greedy: with probability epsilon, choose random action
-        if (epsilon > 0 && Math.random() < epsilon) {
-            return Math.floor(Math.random() * NUM_ACTIONS);
+        // Warn if epsilon is provided (deprecated with NoisyNet)
+        if (epsilon > 0) {
+            console.warn('[Train] Epsilon parameter is ignored with NoisyNet. Exploration is handled automatically via noise.');
         }
         
-        // Otherwise, choose action with highest Q-value (exploitation)
+        // No epsilon-greedy needed - NoisyNet provides exploration via noise
+        // Simply choose action with highest noisy Q-value
         return tf.tidy(() => {
             const gridTensor = convertBatchToGridTensor(stateBuffer, 1);
             const qValues = model.predict(gridTensor);
@@ -1535,6 +1760,7 @@ export function initTraining(context) {
                 let totalLargeFruitReward = 0;
                 let totalFruitDropReward = 0;
                 let totalStepPenalty = 0;
+                let totalTimeWastingPenalty = 0;
                 let totalGameOverPenalty = 0;
                 
                 // Get initial state and initialize frame history with it
@@ -1584,7 +1810,7 @@ export function initTraining(context) {
                     
                     // Compute shaped reward (never zero) - action 3 is drop
                     const wasDrop = action === 3;
-                    const { shapedReward, components } = computeShapedReward(scoreDelta, currentMaxFruit, done, wasDrop);
+                    const { shapedReward, components } = computeShapedReward(scoreDelta, currentMaxFruit, done, wasDrop, window.RL.getStepsSinceLastDrop());
                     totalReward += shapedReward;
                     
                     // Track reward components for logging
@@ -1592,6 +1818,7 @@ export function initTraining(context) {
                     totalLargeFruitReward += components.largeFruit;
                     totalFruitDropReward += components.fruitDrop;
                     totalStepPenalty += components.stepPenalty;
+                    totalTimeWastingPenalty += components.timeWastingPenalty;
                     totalGameOverPenalty += components.gameOver;
                     
                     // Add transition to n-step buffer
@@ -1711,7 +1938,8 @@ export function initTraining(context) {
                         largeFruit: totalLargeFruitReward,
                         fruitDrop: totalFruitDropReward,
                         stepPenalty: totalStepPenalty,
-                        gameOver: totalGameOverPenalty
+                        gameOver: totalGameOverPenalty,
+                        timeWastingPenalty: totalTimeWastingPenalty,
                     },
                     avgMeanTDError: avgMeanTDError
                 };
@@ -1729,7 +1957,7 @@ export function initTraining(context) {
                     console.log(
                         `[Train] Reward components: ` +
                         `merge=${totalMergeReward.toFixed(0)}, largeFruit=${totalLargeFruitReward.toFixed(0)}, ` +
-                        `fruitDrop=${totalFruitDropReward.toFixed(0)}, stepPenalty=${totalStepPenalty.toFixed(2)}, gameOver=${totalGameOverPenalty.toFixed(0)}`
+                        `fruitDrop=${totalFruitDropReward.toFixed(0)}, stepPenalty=${totalStepPenalty.toFixed(2)}, timeWastingPenalty=${totalTimeWastingPenalty.toFixed(2)}, gameOver=${totalGameOverPenalty.toFixed(0)}`
                     );
                     if (trainCount > 0) {
                         console.log(`[Train] Mean TD error: ${avgMeanTDError.toFixed(4)}`);
@@ -1935,6 +2163,7 @@ export function initTraining(context) {
                 let totalMergeReward = 0;
                 let totalLargeFruitReward = 0;
                 let totalFruitDropReward = 0;
+                let totalTimeWastingPenalty = 0;
                 let totalStepPenalty = 0;
                 let totalGameOverPenalty = 0;
                 
@@ -1977,13 +2206,14 @@ export function initTraining(context) {
                     
                     // Compute shaped reward (never zero) - action 3 is drop
                     const wasDrop = action === 3;
-                    const { shapedReward, components } = computeShapedReward(scoreDelta, currentMaxFruit, done, wasDrop);
+                    const { shapedReward, components } = computeShapedReward(scoreDelta, currentMaxFruit, done, wasDrop, window.RL.getStepsSinceLastDrop());
                     totalReward += shapedReward;
                     
                     // Track reward components for logging
                     totalMergeReward += components.merge;
                     totalLargeFruitReward += components.largeFruit;
                     totalFruitDropReward += components.fruitDrop;
+                    totalTimeWastingPenalty += components.timeWastingPenalty;
                     totalStepPenalty += components.stepPenalty;
                     totalGameOverPenalty += components.gameOver;
                     
@@ -2102,7 +2332,8 @@ export function initTraining(context) {
                         largeFruit: totalLargeFruitReward,
                         fruitDrop: totalFruitDropReward,
                         stepPenalty: totalStepPenalty,
-                        gameOver: totalGameOverPenalty
+                        gameOver: totalGameOverPenalty,
+                        timeWastingPenalty: totalTimeWastingPenalty,
                     },
                     avgMeanTDError: avgMeanTDError
                 });
@@ -2118,7 +2349,7 @@ export function initTraining(context) {
                     console.log(
                         `[Train] Reward components: ` +
                         `merge=${totalMergeReward.toFixed(0)}, largeFruit=${totalLargeFruitReward.toFixed(0)}, ` +
-                        `fruitDrop=${totalFruitDropReward.toFixed(0)}, stepPenalty=${totalStepPenalty.toFixed(2)}, gameOver=${totalGameOverPenalty.toFixed(0)}`
+                        `fruitDrop=${totalFruitDropReward.toFixed(0)}, stepPenalty=${totalStepPenalty.toFixed(2)}, timeWastingPenalty=${totalTimeWastingPenalty.toFixed(2)}, gameOver=${totalGameOverPenalty.toFixed(0)}`
                     );
                     if (trainCount > 0) {
                         console.log(`[Train] Mean TD error: ${avgMeanTDError.toFixed(4)}`);
@@ -2309,12 +2540,13 @@ export function initTraining(context) {
     };
     
     /**
-     * Select action using epsilon-greedy policy.
+     * Select action using NoisyNet Q-values.
      * This is the public API for action selection.
      * Note: For frame stacking, the caller must maintain frame history and provide stacked state.
+     * Note: epsilon parameter is ignored - NoisyNet provides exploration through parametric noise.
      * 
      * @param {number[]|Float32Array} state - Stacked state vector (465 elements = 155 * 3 frames)
-     * @param {number} [epsilon=0] - Exploration rate (0-1). With probability epsilon, returns random action.
+     * @param {number} [epsilon=0] - Ignored (kept for API compatibility)
      * @returns {number} Action index (0-3)
      */
     window.RL.selectAction = function(state, epsilon = 0) {
@@ -2331,12 +2563,13 @@ export function initTraining(context) {
     console.log('[Train] Optimized training module initialized.');
     console.log('[Train] Use RL.initModel() to build the model, then await RL.train(numEpisodes) to train.');
     console.log('[Train] Both RL.train() and RL.trainAsync() yield to event loop to prevent browser freeze.');
-    console.log('[Train] Model architecture: Dueling DQN with 512-512-256-128 hidden layers, Value stream (1 unit), Advantage stream (4 units).');
+    console.log('[Train] Model architecture: Dueling DQN with 512-512-256-128 hidden layers, NoisyNet Value stream (1 unit), NoisyNet Advantage stream (4 units).');
+    console.log('[Train] Exploration: NoisyNet with factorized Gaussian noise (no epsilon-greedy).');
     console.log('[Train] State representation: Frame stacking with ' + FRAME_STACK_SIZE + ' frames (' + BASE_STATE_SIZE + ' * ' + FRAME_STACK_SIZE + ' = ' + STATE_SIZE + ' elements).');
     console.log('[Train] N-step returns: n=' + N_STEP_RETURNS + ' for multi-step DQN.');
     console.log('[Train] Batch size: ' + DEFAULT_BATCH_SIZE + ', Learning rate decay: 1e-4 → 5e-5 (100 eps) → 3e-5 (200 eps).');
     console.log('[Train] Training frequency: every ' + DEFAULT_TRAIN_EVERY_N_STEPS + ' steps.');
     console.log('[Train] Features: Dueling Double DQN, rank-based prioritized replay (α=' + PRIORITY_ALPHA + ', β annealed ' + PRIORITY_BETA_START + '→' + PRIORITY_BETA_END + '), reward shaping.');
     console.log('[Train] Stability: Huber loss (δ=' + HUBER_DELTA + '), gradient clipping (max=' + GRADIENT_CLIP_NORM + '), soft target updates (τ=' + TAU + ').');
-    console.log('[Train] Reward shaping (normalized): +' + REWARD_MERGE + ' merge, +' + REWARD_LARGE_FRUIT + ' large fruit, +' + REWARD_FRUIT_DROP + ' fruit drop, ' + REWARD_STEP_PENALTY + ' step penalty, ' + REWARD_GAME_OVER + ' game over.');
+    console.log('[Train] Reward shaping (normalized): +' + REWARD_MERGE + ' merge, +' + REWARD_LARGE_FRUIT + ' large fruit, +' + REWARD_FRUIT_DROP + ' fruit drop, ' + REWARD_STEP_PENALTY + ' step penalty, ' + REWARD_TIME_WASTING_PENALTY + ' time-wasting penalty (after 5s), ' + REWARD_GAME_OVER + ' game over.');
 }
