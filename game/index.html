@@ -2702,7 +2702,18 @@
                         updateRLStatus('Loading model...');
                         const success = await window.RL.loadModel();
                         if (success) {
-                            updateRLStatus('Model loaded successfully');
+                            // Try to get metadata to show current training state
+                            const metadataStr = localStorage.getItem('fruit-merge-dqn-metadata');
+                            if (metadataStr) {
+                                try {
+                                    const metadata = JSON.parse(metadataStr);
+                                    updateRLStatus(`Model loaded (Episode ${metadata.episodeCount || 0})`);
+                                } catch (e) {
+                                    updateRLStatus('Model loaded successfully');
+                                }
+                            } else {
+                                updateRLStatus('Model loaded successfully');
+                            }
                         } else {
                             updateRLStatus('No saved model found');
                         }
