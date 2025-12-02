@@ -13,4 +13,5 @@ Thumbs.db
 .idea/
 
 # Test files
+game/test_*.html
 test_noisynet.html

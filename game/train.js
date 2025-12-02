@@ -400,6 +400,21 @@ export function initTraining(context) {
     const FRAME_STACK_SIZE = 3;   // Number of frames to stack
     const STATE_SIZE = BASE_STATE_SIZE * FRAME_STACK_SIZE;  // 155 * 3 = 465-element stacked state vector
     const NUM_ACTIONS = 4;   // 4 discrete actions (left, right, center, drop)
+    
+    // Spatial grid configuration for CNN
+    const GRID_WIDTH = 10;   // Grid width for spatial representation
+    const GRID_HEIGHT = 15;  // Grid height for spatial representation
+    const GRID_CHANNELS = 4; // Number of channels per frame (board fruits, current fruit, next fruit, booster)
+    const GRID_TOTAL_CHANNELS = GRID_CHANNELS * FRAME_STACK_SIZE; // Total channels with frame stacking (4 * 3 = 12)
+    
+    // CNN architecture configuration
+    const CNN_FILTERS_1 = 32;  // First conv layer filters
+    const CNN_FILTERS_2 = 64;  // Second conv layer filters
+    const CNN_KERNEL_SIZE = 3; // Kernel size for conv layers
+    const CNN_STRIDE = 1;      // Stride for conv layers
+    const CNN_DENSE_UNITS = 256; // Dense layer after CNN (replaces dense layers 1-4)
+    
+    // Original dense architecture (not used with CNN)
     const HIDDEN_UNITS_1 = 512; // First hidden layer units
     const HIDDEN_UNITS_2 = 512; // Second hidden layer units
     const HIDDEN_UNITS_3 = 256; // Third hidden layer units
@@ -675,6 +690,175 @@ export function initTraining(context) {
     }
     
     /**
+     * Convert a single flat state frame (155 elements) to a spatial grid representation.
+     * 
+     * The flat state format is:
+     * - [0]: Current fruit X (0-1)
+     * - [1]: Current fruit Y (0-1)
+     * - [2]: Current fruit level (0-1)
+     * - [3]: Next fruit level (0-1)
+     * - [4]: Booster available (0 or 1)
+     * - [5-154]: Board fruits, 50 fruits * 3 values (x, y, level)
+     * 
+     * The spatial grid is GRID_WIDTH x GRID_HEIGHT x GRID_CHANNELS:
+     * - Channel 0: Board fruits (fruit level at each grid cell, max if multiple fruits)
+     * - Channel 1: Current falling fruit (current fruit level at its grid position)
+     * - Channel 2: Next fruit level (constant across all cells)
+     * - Channel 3: Booster availability (constant across all cells)
+     * 
+     * @param {Float32Array|number[]} flatState - 155-element flat state
+     * @param {Float32Array} gridBuffer - Output buffer of size GRID_WIDTH * GRID_HEIGHT * GRID_CHANNELS
+     */
+    function convertFlatStateToGrid(flatState, gridBuffer) {
+        // Clear the grid buffer
+        gridBuffer.fill(0);
+        
+        // Extract metadata from flat state
+        const currentX = flatState[0];
+        const currentY = flatState[1];
+        const currentLevel = flatState[2];
+        const nextLevel = flatState[3];
+        const boosterAvailable = flatState[4];
+        
+        // Helper function to convert normalized position to grid indices
+        function posToGridIndex(normX, normY) {
+            const gridX = Math.floor(normX * GRID_WIDTH);
+            const gridY = Math.floor(normY * GRID_HEIGHT);
+            // Clamp to valid range
+            const clampedX = Math.max(0, Math.min(GRID_WIDTH - 1, gridX));
+            const clampedY = Math.max(0, Math.min(GRID_HEIGHT - 1, gridY));
+            return { x: clampedX, y: clampedY };
+        }
+        
+        // Helper function to get flat index in grid buffer
+        function getGridBufferIndex(gridX, gridY, channel) {
+            return (gridY * GRID_WIDTH + gridX) * GRID_CHANNELS + channel;
+        }
+        
+        // Channel 0: Board fruits
+        // Process all board fruits (starting at index 5)
+        for (let i = 5; i < flatState.length; i += 3) {
+            const fruitX = flatState[i];
+            const fruitY = flatState[i + 1];
+            const fruitLevel = flatState[i + 2];
+            
+            // Skip if no fruit at this slot (level is 0)
+            if (fruitLevel === 0) continue;
+            
+            const { x: gridX, y: gridY } = posToGridIndex(fruitX, fruitY);
+            const idx = getGridBufferIndex(gridX, gridY, 0);
+            
+            // Take max fruit level if multiple fruits in same cell
+            gridBuffer[idx] = Math.max(gridBuffer[idx], fruitLevel);
+        }
+        
+        // Channel 1: Current falling fruit
+        if (currentLevel > 0) {
+            const { x: gridX, y: gridY } = posToGridIndex(currentX, currentY);
+            const idx = getGridBufferIndex(gridX, gridY, 1);
+            gridBuffer[idx] = currentLevel;
+        }
+        
+        // Channel 2: Next fruit level (constant across all cells)
+        const channel2Offset = 2;
+        for (let y = 0; y < GRID_HEIGHT; y++) {
+            const rowOffset = y * GRID_WIDTH * GRID_CHANNELS + channel2Offset;
+            for (let x = 0; x < GRID_WIDTH; x++) {
+                gridBuffer[rowOffset + x * GRID_CHANNELS] = nextLevel;
+            }
+        }
+        
+        // Channel 3: Booster availability (constant across all cells)
+        const channel3Offset = 3;
+        for (let y = 0; y < GRID_HEIGHT; y++) {
+            const rowOffset = y * GRID_WIDTH * GRID_CHANNELS + channel3Offset;
+            for (let x = 0; x < GRID_WIDTH; x++) {
+                gridBuffer[rowOffset + x * GRID_CHANNELS] = boosterAvailable;
+            }
+        }
+    }
+    
+    /**
+     * Convert stacked flat state (3 frames * 155 elements = 465) to stacked spatial grid.
+     * Output shape: GRID_WIDTH x GRID_HEIGHT x (GRID_CHANNELS * FRAME_STACK_SIZE)
+     * 
+     * @param {Float32Array} stackedFlatState - 465-element stacked flat state
+     * @returns {Float32Array} Grid buffer of size GRID_WIDTH * GRID_HEIGHT * GRID_TOTAL_CHANNELS
+     */
+    function convertStackedStateToGrid(stackedFlatState) {
+        const gridSize = GRID_WIDTH * GRID_HEIGHT * GRID_TOTAL_CHANNELS;
+        const stackedGrid = new Float32Array(gridSize);
+        
+        // Temporary buffer for single frame grid conversion
+        const tempGridBuffer = new Float32Array(GRID_WIDTH * GRID_HEIGHT * GRID_CHANNELS);
+        
+        // Convert each frame
+        for (let frameIdx = 0; frameIdx < FRAME_STACK_SIZE; frameIdx++) {
+            // Extract single frame from stacked state
+            const frameOffset = frameIdx * BASE_STATE_SIZE;
+            const singleFrame = stackedFlatState.subarray(frameOffset, frameOffset + BASE_STATE_SIZE);
+            
+            // Convert to grid
+            convertFlatStateToGrid(singleFrame, tempGridBuffer);
+            
+            // Copy to stacked grid with channel offset
+            for (let y = 0; y < GRID_HEIGHT; y++) {
+                for (let x = 0; x < GRID_WIDTH; x++) {
+                    for (let c = 0; c < GRID_CHANNELS; c++) {
+                        const srcIdx = (y * GRID_WIDTH + x) * GRID_CHANNELS + c;
+                        // Stack channels: frame 0 channels 0-3, frame 1 channels 4-7, frame 2 channels 8-11
+                        const dstChannel = frameIdx * GRID_CHANNELS + c;
+                        const dstIdx = (y * GRID_WIDTH + x) * GRID_TOTAL_CHANNELS + dstChannel;
+                        stackedGrid[dstIdx] = tempGridBuffer[srcIdx];
+                    }
+                }
+            }
+        }
+        
+        return stackedGrid;
+    }
+    
+    /**
+     * Convert a batch of flat states to grid tensor for GPU-accelerated processing.
+     * This function runs on the CPU but allows the model to run fully on GPU.
+     * 
+     * @param {Float32Array} flatStates - Flat states array (batchSize * STATE_SIZE)
+     * @param {number} batchSize - Number of states in the batch
+     * @returns {tf.Tensor4D} Grid tensor with shape [batchSize, GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS]
+     */
+    function convertBatchToGridTensor(flatStates, batchSize) {
+        // Pre-allocate the grid data array
+        const gridSize = GRID_HEIGHT * GRID_WIDTH * GRID_TOTAL_CHANNELS;
+        const batchGridData = new Float32Array(batchSize * gridSize);
+        
+        // Reuse buffer for single grid conversion to reduce allocations
+        const tempGridBuffer = new Float32Array(gridSize);
+        
+        // Convert each state in the batch
+        for (let b = 0; b < batchSize; b++) {
+            const stateOffset = b * STATE_SIZE;
+            const gridOffset = b * gridSize;
+            
+            // Extract single stacked state
+            const singleState = flatStates.subarray(stateOffset, stateOffset + STATE_SIZE);
+            
+            // Convert to grid (reuses tempGridBuffer)
+            const gridData = convertStackedStateToGrid(singleState);
+            
+            // Copy to batch array
+            for (let i = 0; i < gridSize; i++) {
+                batchGridData[gridOffset + i] = gridData[i];
+            }
+        }
+        
+        // Create and return the 4D tensor
+        return tf.tensor4d(
+            batchGridData,
+            [batchSize, GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS]
+        );
+    }
+    
+    /**
      * Custom NoisyDense layer using factorized Gaussian noise.
      * Implements the NoisyNet formula: y = (μ_w + σ_w ⊙ ε_w) x + (μ_b + σ_b ⊙ ε_b)
      * 
@@ -890,57 +1074,61 @@ export function initTraining(context) {
     }
     
     /**
-     * Create a Q-network model with dueling DQN architecture.
+     * Create a Q-network model with CNN + NoisyNet + Dueling DQN architecture.
      * Used for both main model and target model.
      * 
      * Architecture:
-     * - Input: 465-element stacked state vector (155 * 3 frames)
-     * - Dense: 512 units, ReLU
-     * - Dense: 512 units, ReLU
+     * - Input: Spatial grid tensor (GRID_HEIGHT x GRID_WIDTH x GRID_TOTAL_CHANNELS)
+     * - Conv2D: 32 filters, 3x3 kernel, stride 1, ReLU
+     * - Conv2D: 64 filters, 3x3 kernel, stride 1, ReLU
+     * - Flatten
      * - Dense: 256 units, ReLU
-     * - Dense: 128 units, ReLU (shared final hidden layer)
      * - Split into two streams:
      *   - Value stream: NoisyDense 1 unit (V(s))
      *   - Advantage stream: NoisyDense 4 units (A(s,a))
      * - Combine: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))
      * - Output: 4 units (Q-values for each action)
      * 
+     * Note: States are preprocessed to grid format before feeding to the model,
+     * enabling full GPU acceleration throughout the network.
+     * 
      * @returns {tf.LayersModel} The created model
      */
     function createQNetwork() {
-        // Input layer
-        const input = tf.input({shape: [STATE_SIZE]});
+        // Input layer - spatial grid (no flat state conversion needed)
+        const input = tf.input({shape: [GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS]});
         
-        // First hidden layer
-        let hidden = tf.layers.dense({
-            units: HIDDEN_UNITS_1,
+        // First convolutional layer
+        let conv = tf.layers.conv2d({
+            filters: CNN_FILTERS_1,
+            kernelSize: CNN_KERNEL_SIZE,
+            strides: CNN_STRIDE,
             activation: 'relu',
             kernelInitializer: 'heNormal',
-            name: 'dense_1'
+            name: 'conv2d_1'
         }).apply(input);
         
-        // Second hidden layer
-        hidden = tf.layers.dense({
-            units: HIDDEN_UNITS_2,
+        // Second convolutional layer
+        conv = tf.layers.conv2d({
+            filters: CNN_FILTERS_2,
+            kernelSize: CNN_KERNEL_SIZE,
+            strides: CNN_STRIDE,
             activation: 'relu',
             kernelInitializer: 'heNormal',
-            name: 'dense_2'
-        }).apply(hidden);
+            name: 'conv2d_2'
+        }).apply(conv);
         
-        // Third hidden layer
-        hidden = tf.layers.dense({
-            units: HIDDEN_UNITS_3,
-            activation: 'relu',
-            kernelInitializer: 'heNormal',
-            name: 'dense_3'
-        }).apply(hidden);
+        // Flatten the convolutional output
+        let hidden = tf.layers.flatten({
+            name: 'flatten'
+        }).apply(conv);
         
-        // Fourth hidden layer (shared final hidden layer)
+        // Dense layer after CNN
         hidden = tf.layers.dense({
-            units: HIDDEN_UNITS_4,
+            units: CNN_DENSE_UNITS,
             activation: 'relu',
             kernelInitializer: 'heNormal',
-            name: 'dense_4'
+            name: 'dense_post_cnn'
         }).apply(hidden);
         
         // Value stream: outputs V(s) - a single scalar value
@@ -993,7 +1181,7 @@ export function initTraining(context) {
         const network = tf.model({
             inputs: input,
             outputs: output,
-            name: 'dueling_dqn'
+            name: 'cnn_noisynet_dueling_dqn'
         });
         
         return network;
@@ -1041,9 +1229,17 @@ export function initTraining(context) {
         replayBuffer = new ReplayBuffer(DEFAULT_REPLAY_BUFFER_SIZE, STATE_SIZE);
         
         console.log('[Train] Model built and compiled successfully.');
-        console.log('[Train] Architecture: Dueling DQN with 512-512-256-128 hidden layers, NoisyNet Value stream (1 unit), NoisyNet Advantage stream (4 units)');
-        console.log('[Train] Exploration: NoisyNet with factorized Gaussian noise (replaces epsilon-greedy)');
-        console.log('[Train] Dueling aggregation: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a))), batch size: ' + DEFAULT_BATCH_SIZE);
+        console.log('[Train] Architecture: CNN + NoisyNet + Dueling DQN (GPU-accelerated)');
+        console.log('[Train]   - Input: Spatial grid tensor (15x10x12) - preprocessed from 465-element flat state');
+        console.log('[Train]   - Conv2D: 32 filters, 3x3 kernel, ReLU');
+        console.log('[Train]   - Conv2D: 64 filters, 3x3 kernel, ReLU');
+        console.log('[Train]   - Flatten + Dense: 256 units, ReLU');
+        console.log('[Train]   - Dueling streams: NoisyNet Value (1 unit) + NoisyNet Advantage (4 units)');
+        console.log('[Train]   - Output: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))');
+        console.log('[Train] Exploration: NoisyNet with factorized Gaussian noise (no epsilon-greedy)');
+        console.log('[Train] Preprocessing: States converted to grids before model input (CPU)');
+        console.log('[Train] Processing: Full GPU acceleration from Conv2D through output');
+        console.log('[Train] Batch size: ' + DEFAULT_BATCH_SIZE);
         console.log('[Train] Learning rate decay: ' + LEARNING_RATE_INITIAL + ' → ' + LEARNING_RATE_100 + ' (100 eps) → ' + LEARNING_RATE_200 + ' (200 eps)');
         console.log('[Train] Target model initialized with same weights (hard update).');
         console.log('[Train] Stability features enabled: Huber loss, gradient clipping, soft target updates (τ=' + TAU + ').');
@@ -1109,14 +1305,16 @@ export function initTraining(context) {
     /**
      * Batched prediction for multiple states.
      * More efficient than individual predict calls.
+     * Converts flat states to grid format for GPU-accelerated CNN processing.
+     * 
      * @param {Float32Array} statesFlat - Flattened states array (batchSize * stateSize)
      * @param {number} batchSize - Number of states in the batch
      * @returns {Float32Array} Q-values for all states (batchSize * numActions)
      */
     function batchedPredict(statesFlat, batchSize) {
         return tf.tidy(() => {
-            const statesTensor = tf.tensor2d(statesFlat, [batchSize, STATE_SIZE]);
-            const qValues = model.predict(statesTensor);
+            const gridTensor = convertBatchToGridTensor(statesFlat, batchSize);
+            const qValues = model.predict(gridTensor);
             return qValues.dataSync();
         });
     }
@@ -1126,6 +1324,7 @@ export function initTraining(context) {
      * NoisyNet layers automatically provide exploration through parametric noise,
      * so we don't need epsilon-greedy exploration.
      * Uses tf.tidy() to prevent memory leaks.
+     * Converts flat state to grid format for GPU-accelerated CNN processing.
      * 
      * @param {Float32Array} stateBuffer - Pre-allocated state buffer
      * @param {number} epsilon - Ignored (kept for API compatibility, will log warning if non-zero)
@@ -1140,8 +1339,8 @@ export function initTraining(context) {
         // No epsilon-greedy needed - NoisyNet provides exploration via noise
         // Simply choose action with highest noisy Q-value
         return tf.tidy(() => {
-            const stateTensor = tf.tensor2d(stateBuffer, [1, STATE_SIZE]);
-            const qValues = model.predict(stateTensor);
+            const gridTensor = convertBatchToGridTensor(stateBuffer, 1);
+            const qValues = model.predict(gridTensor);
             return qValues.argMax(1).dataSync()[0];
         });
     }
@@ -1225,15 +1424,16 @@ export function initTraining(context) {
         
         // Compute targets and TD errors using Double DQN inside tf.tidy()
         const { targets, currentQForActions } = tf.tidy(() => {
-            const nextStatesTensor = tf.tensor2d(nextStates, [actualBatchSize, STATE_SIZE]);
+            // Convert next states to grid format for GPU-accelerated processing
+            const nextStatesGridTensor = convertBatchToGridTensor(nextStates, actualBatchSize);
             
             // DOUBLE DQN: Use ONLINE model to select actions
-            const onlineNextQValues = model.predict(nextStatesTensor);
+            const onlineNextQValues = model.predict(nextStatesGridTensor);
             const bestActions = onlineNextQValues.argMax(1).dataSync();
             
             // DOUBLE DQN: Use TARGET model to evaluate the selected actions
             // Clip target Q-values to prevent extreme values
-            const targetNextQValues = targetModel.predict(nextStatesTensor);
+            const targetNextQValues = targetModel.predict(nextStatesGridTensor);
             const targetNextQClipped = tf.clipByValue(targetNextQValues, -MAX_Q_VALUE, MAX_Q_VALUE);
             const targetNextQData = targetNextQClipped.arraySync();
             
@@ -1242,8 +1442,9 @@ export function initTraining(context) {
                 //console.log('[Train] Stability: Huber loss, gradient clipping, Q-value clipping enabled');
             }
             
-            const statesTensor = tf.tensor2d(states, [actualBatchSize, STATE_SIZE]);
-            const currentQValues = model.predict(statesTensor);
+            // Convert current states to grid format
+            const statesGridTensor = convertBatchToGridTensor(states, actualBatchSize);
+            const currentQValues = model.predict(statesGridTensor);
             const currentQData = currentQValues.arraySync();
             
             // Store current Q values for the taken actions (for TD error calculation)
@@ -1278,7 +1479,7 @@ export function initTraining(context) {
         });
         
         // Compute gradients and apply using optimizer with gradient clipping
-        const statesTensor = tf.tensor2d(states, [actualBatchSize, STATE_SIZE]);
+        const statesGridTensor = convertBatchToGridTensor(states, actualBatchSize);
         
         // Create weights tensor if we have importance sampling weights
         let weightsTensor = null;
@@ -1288,7 +1489,7 @@ export function initTraining(context) {
         
         // Define loss function using Huber loss for stability
         const lossFunction = () => {
-            const predictions = model.predict(statesTensor);
+            const predictions = model.predict(statesGridTensor);
             
             if (weightsTensor) {
                 // Weighted Huber loss for prioritized experience replay
@@ -1333,7 +1534,7 @@ export function initTraining(context) {
         
         // Clean up tensors
         targets.dispose();
-        statesTensor.dispose();
+        statesGridTensor.dispose();
         loss.dispose();
         Object.values(grads).forEach(g => g.dispose());
         Object.values(clippedGrads).forEach(g => g.dispose());
