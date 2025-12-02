@@ -755,6 +755,14 @@ export function initTraining(context) {
          * Reset noise samples (called at each forward pass)
          */
         resetNoise() {
+            // Dispose previous noise tensors if they exist
+            if (this.epsilonInput) {
+                this.epsilonInput.dispose();
+            }
+            if (this.epsilonOutput) {
+                this.epsilonOutput.dispose();
+            }
+            
             this.epsilonInput = this.factorizedNoise(this.inputDim);
             this.epsilonOutput = this.factorizedNoise(this.units);
         }
@@ -812,6 +820,19 @@ export function initTraining(context) {
             };
             const baseConfig = super.getConfig();
             return Object.assign({}, baseConfig, config);
+        }
+        
+        dispose() {
+            // Clean up noise tensors
+            if (this.epsilonInput) {
+                this.epsilonInput.dispose();
+                this.epsilonInput = null;
+            }
+            if (this.epsilonOutput) {
+                this.epsilonOutput.dispose();
+                this.epsilonOutput = null;
+            }
+            return super.dispose();
         }
         
         static get className() {
