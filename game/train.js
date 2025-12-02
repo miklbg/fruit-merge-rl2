@@ -548,6 +548,9 @@ export function initTraining(context) {
     const stateBuffer = new Float32Array(STATE_SIZE);
     const nextStateBuffer = new Float32Array(STATE_SIZE);
     
+    // Pre-allocated temporary buffer for extracting single frame from stacked state
+    const tempSingleFrameBuffer = new Float32Array(BASE_STATE_SIZE);
+    
     // Frame stacking: keep a history of the last FRAME_STACK_SIZE frames
     // Each frame is BASE_STATE_SIZE elements
     const frameHistory = [];
@@ -1316,8 +1319,7 @@ export function initTraining(context) {
                     const done = window.RL.isTerminal();
                     
                     // For max fruit level, we need to extract from the raw state (not stacked)
-                    // Create a temporary buffer for the single frame
-                    const tempSingleFrameBuffer = new Float32Array(BASE_STATE_SIZE);
+                    // Reuse pre-allocated buffer for the single frame
                     const len = Math.min(rawNextState.length, BASE_STATE_SIZE);
                     for (let i = 0; i < len; i++) {
                         tempSingleFrameBuffer[i] = rawNextState[i];
@@ -1710,8 +1712,7 @@ export function initTraining(context) {
                     const done = window.RL.isTerminal();
                     
                     // For max fruit level, we need to extract from the raw state (not stacked)
-                    // Create a temporary buffer for the single frame
-                    const tempSingleFrameBuffer = new Float32Array(BASE_STATE_SIZE);
+                    // Reuse pre-allocated buffer for the single frame
                     const len = Math.min(rawNextState.length, BASE_STATE_SIZE);
                     for (let i = 0; i < len; i++) {
                         tempSingleFrameBuffer[i] = rawNextState[i];
