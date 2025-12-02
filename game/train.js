@@ -1523,7 +1523,7 @@ export function initTraining(context) {
                         largeFruit: totalLargeFruitReward,
                         fruitDrop: totalFruitDropReward,
                         stepPenalty: totalStepPenalty,
-                        gameOver: totalGameOverPenalty
+                        gameOver: totalGameOverPenalty,
                         timeWastingPenalty: totalTimeWastingPenalty,
                     },
                     avgMeanTDError: avgMeanTDError
@@ -1917,7 +1917,7 @@ export function initTraining(context) {
                         largeFruit: totalLargeFruitReward,
                         fruitDrop: totalFruitDropReward,
                         stepPenalty: totalStepPenalty,
-                        gameOver: totalGameOverPenalty
+                        gameOver: totalGameOverPenalty,
                         timeWastingPenalty: totalTimeWastingPenalty,
                     },
                     avgMeanTDError: avgMeanTDError
