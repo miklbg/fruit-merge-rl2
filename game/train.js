@@ -669,7 +669,7 @@ export function initTraining(context) {
     }
     
     /**
-     * Create a Q-network model with the standard architecture.
+     * Create a Q-network model with dueling DQN architecture.
      * Used for both main model and target model.
      * 
      * Architecture:
@@ -677,49 +677,103 @@ export function initTraining(context) {
      * - Dense: 512 units, ReLU
      * - Dense: 512 units, ReLU
      * - Dense: 256 units, ReLU
-     * - Dense: 128 units, ReLU
+     * - Dense: 128 units, ReLU (shared final hidden layer)
+     * - Split into two streams:
+     *   - Value stream: Dense 1 unit (V(s))
+     *   - Advantage stream: Dense 4 units (A(s,a))
+     * - Combine: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))
      * - Output: 4 units (Q-values for each action)
      * 
      * @returns {tf.LayersModel} The created model
      */
     function createQNetwork() {
-        const network = tf.sequential();
+        // Input layer
+        const input = tf.input({shape: [STATE_SIZE]});
         
-        // First hidden layer with input shape
-        network.add(tf.layers.dense({
+        // First hidden layer
+        let hidden = tf.layers.dense({
             units: HIDDEN_UNITS_1,
             activation: 'relu',
-            inputShape: [STATE_SIZE],
-            kernelInitializer: 'heNormal'
-        }));
+            kernelInitializer: 'heNormal',
+            name: 'dense_1'
+        }).apply(input);
         
         // Second hidden layer
-        network.add(tf.layers.dense({
+        hidden = tf.layers.dense({
             units: HIDDEN_UNITS_2,
             activation: 'relu',
-            kernelInitializer: 'heNormal'
-        }));
+            kernelInitializer: 'heNormal',
+            name: 'dense_2'
+        }).apply(hidden);
         
         // Third hidden layer
-        network.add(tf.layers.dense({
+        hidden = tf.layers.dense({
             units: HIDDEN_UNITS_3,
             activation: 'relu',
-            kernelInitializer: 'heNormal'
-        }));
+            kernelInitializer: 'heNormal',
+            name: 'dense_3'
+        }).apply(hidden);
         
-        // Fourth hidden layer
-        network.add(tf.layers.dense({
+        // Fourth hidden layer (shared final hidden layer)
+        hidden = tf.layers.dense({
             units: HIDDEN_UNITS_4,
             activation: 'relu',
-            kernelInitializer: 'heNormal'
-        }));
+            kernelInitializer: 'heNormal',
+            name: 'dense_4'
+        }).apply(hidden);
         
-        // Output layer (Q-values for each action)
-        network.add(tf.layers.dense({
+        // Value stream: outputs V(s) - a single scalar value
+        const valueStream = tf.layers.dense({
+            units: 1,
+            activation: 'linear',
+            kernelInitializer: 'glorotNormal',
+            name: 'value'
+        }).apply(hidden);
+        
+        // Advantage stream: outputs A(s,a) - one value per action
+        const advantageStream = tf.layers.dense({
             units: NUM_ACTIONS,
             activation: 'linear',
-            kernelInitializer: 'glorotNormal'
-        }));
+            kernelInitializer: 'glorotNormal',
+            name: 'advantage'
+        }).apply(hidden);
+        
+        // Combine streams using dueling formula: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))
+        // This is implemented as a custom lambda layer
+        const output = tf.layers.lambda({
+            computeOutputShape: (inputShape) => {
+                // inputShape is array of shapes: [[batch, 1], [batch, NUM_ACTIONS]]
+                // Return the advantage stream shape (second input)
+                return [null, NUM_ACTIONS];
+            },
+            apply: (inputs) => {
+                return tf.tidy(() => {
+                    const value = inputs[0];  // Shape: [batch, 1]
+                    const advantage = inputs[1];  // Shape: [batch, NUM_ACTIONS]
+                    
+                    // Compute mean advantage across actions: mean(A(s,a))
+                    // keepdims=true maintains the dimension for broadcasting
+                    const advantageMean = tf.mean(advantage, 1, true);  // Shape: [batch, 1]
+                    
+                    // Compute centered advantages: A(s,a) - mean(A(s,a))
+                    const centeredAdvantage = tf.sub(advantage, advantageMean);  // Shape: [batch, NUM_ACTIONS]
+                    
+                    // Compute Q-values: V(s) + (A(s,a) - mean(A(s,a)))
+                    // Broadcasting handles the dimension alignment (value is [batch, 1] broadcast to [batch, NUM_ACTIONS])
+                    const qValues = tf.add(value, centeredAdvantage);  // Shape: [batch, NUM_ACTIONS]
+                    
+                    return qValues;
+                });
+            },
+            name: 'dueling_aggregation'
+        }).apply([valueStream, advantageStream]);
+        
+        // Create the model
+        const network = tf.model({
+            inputs: input,
+            outputs: output,
+            name: 'dueling_dqn'
+        });
         
         return network;
     }
@@ -766,7 +820,8 @@ export function initTraining(context) {
         replayBuffer = new ReplayBuffer(DEFAULT_REPLAY_BUFFER_SIZE, STATE_SIZE);
         
         console.log('[Train] Model built and compiled successfully.');
-        console.log('[Train] Architecture: 512-512-256-128 hidden layers, batch size: ' + DEFAULT_BATCH_SIZE);
+        console.log('[Train] Architecture: Dueling DQN with 512-512-256-128 hidden layers, Value stream (1 unit), Advantage stream (4 units)');
+        console.log('[Train] Dueling aggregation: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a))), batch size: ' + DEFAULT_BATCH_SIZE);
         console.log('[Train] Learning rate decay: ' + LEARNING_RATE_INITIAL + ' → ' + LEARNING_RATE_100 + ' (100 eps) → ' + LEARNING_RATE_200 + ' (200 eps)');
         console.log('[Train] Target model initialized with same weights (hard update).');
         console.log('[Train] Stability features enabled: Huber loss, gradient clipping, soft target updates (τ=' + TAU + ').');
@@ -2075,12 +2130,12 @@ export function initTraining(context) {
     console.log('[Train] Optimized training module initialized.');
     console.log('[Train] Use RL.initModel() to build the model, then await RL.train(numEpisodes) to train.');
     console.log('[Train] Both RL.train() and RL.trainAsync() yield to event loop to prevent browser freeze.');
-    console.log('[Train] Model architecture: 512-512-256-128 hidden layers with 4 output units.');
+    console.log('[Train] Model architecture: Dueling DQN with 512-512-256-128 hidden layers, Value stream (1 unit), Advantage stream (4 units).');
     console.log('[Train] State representation: Frame stacking with ' + FRAME_STACK_SIZE + ' frames (' + BASE_STATE_SIZE + ' * ' + FRAME_STACK_SIZE + ' = ' + STATE_SIZE + ' elements).');
     console.log('[Train] N-step returns: n=' + N_STEP_RETURNS + ' for multi-step DQN.');
     console.log('[Train] Batch size: ' + DEFAULT_BATCH_SIZE + ', Learning rate decay: 1e-4 → 5e-5 (100 eps) → 3e-5 (200 eps).');
     console.log('[Train] Training frequency: every ' + DEFAULT_TRAIN_EVERY_N_STEPS + ' steps.');
-    console.log('[Train] Features: Double DQN, rank-based prioritized replay (α=' + PRIORITY_ALPHA + ', β annealed ' + PRIORITY_BETA_START + '→' + PRIORITY_BETA_END + '), reward shaping.');
+    console.log('[Train] Features: Dueling Double DQN, rank-based prioritized replay (α=' + PRIORITY_ALPHA + ', β annealed ' + PRIORITY_BETA_START + '→' + PRIORITY_BETA_END + '), reward shaping.');
     console.log('[Train] Stability: Huber loss (δ=' + HUBER_DELTA + '), gradient clipping (max=' + GRADIENT_CLIP_NORM + '), soft target updates (τ=' + TAU + ').');
     console.log('[Train] Reward shaping (normalized): +' + REWARD_MERGE + ' merge, +' + REWARD_LARGE_FRUIT + ' large fruit, +' + REWARD_FRUIT_DROP + ' fruit drop, ' + REWARD_STEP_PENALTY + ' step penalty, ' + REWARD_GAME_OVER + ' game over.');
 }
