@@ -651,6 +651,9 @@
             // Calculate cooldown steps for headless/FastSim mode at the physics simulation rate
             const PHYSICS_FPS = 60;
             const DROP_COOLDOWN_STEPS = Math.ceil(DROP_COOLDOWN_MS * PHYSICS_FPS / 1000);
+            // Time-wasting penalty thresholds
+            const TIME_WASTING_PENALTY_STEPS = 5 * PHYSICS_FPS; // 5 seconds = 300 steps
+            const FORCED_DROP_STEPS = 10 * PHYSICS_FPS; // 10 seconds = 600 steps
             const HIGHSCORE_KEY = 'fruit-merge-highscore';
             const GAME_STATE_KEY = 'fruit-merge-gamestate';
             const ACHIEVEMENTS_KEY = 'fruit-merge-achievements';
@@ -719,6 +722,7 @@
             let isGameOverAnimating = false; // Flag to prevent actions during game over animation
             let isHeadlessMode = false; // Flag to disable rendering and audio during FastSim
             let dropCooldownStepsRemaining = 0; // Step-based cooldown counter for headless/FastSim mode
+            let stepsSinceLastDrop = 0; // Track steps since last fruit drop for time-wasting penalty
             
             function updateBoosterIndicator() {
                 if (!boosterUnlocked) {
@@ -1281,6 +1285,9 @@
                      * - 2: Move fruit to center (normalized X = 0.5)
                      * - 3: Drop fruit
                      * 
+                     * After 10 seconds (600 steps) without a drop, forces a drop action
+                     * regardless of the requested action.
+                     * 
                      * After performing the action, computes reward as:
                      *   reward = currentScore - RL.lastScore
                      * Applies a small negative penalty (-1) if game over.
@@ -1291,6 +1298,11 @@
                      */
                     window.RL.step = function(actionIndex) {
                         const dx = 0.04; // Small horizontal step size
+                        
+                        // Force drop after 10 seconds (600 steps) without dropping a fruit
+                        if (stepsSinceLastDrop >= FORCED_DROP_STEPS) {
+                            actionIndex = 3; // Force drop action
+                        }
                         
                         // Get current normalized X position
                         const currentXNorm = currentPreviewX / gameWorldWidth;
@@ -1436,6 +1448,7 @@
                             isGameOverAnimating = false;
                             lastDropTime = 0;
                             dropCooldownStepsRemaining = 0; // Reset step-based cooldown
+                            stepsSinceLastDrop = 0; // Reset time-wasting penalty counter
                             lastDroppedFruit = null;
                             currentGameMaxFruit = -1;
                             boosterCooldownCount = 0;
@@ -1525,11 +1538,24 @@
                      * Tick the step-based cooldown counter (for headless/FastSim mode).
                      * Should be called once per physics step.
                      * Decrements the drop cooldown counter if it's greater than 0.
+                     * Also increments the stepsSinceLastDrop counter for time-wasting penalty tracking.
                      */
                     window.RL.tickCooldown = function() {
                         if (dropCooldownStepsRemaining > 0) {
                             dropCooldownStepsRemaining--;
                         }
+                        // Increment steps since last drop for time-wasting penalty
+                        stepsSinceLastDrop++;
+                    };
+                    
+                    /**
+                     * Get the number of steps since the last fruit drop.
+                     * Used for time-wasting penalty calculation.
+                     * 
+                     * @returns {number} Number of steps since last drop
+                     */
+                    window.RL.getStepsSinceLastDrop = function() {
+                        return stepsSinceLastDrop;
                     };
                     
                     // --- Initialize FastSim for headless simulation ---
@@ -1570,6 +1596,7 @@
                 isDropping = false;
                 isGameOverAnimating = false; // Reset animation flag
                 lastDropTime = 0; // Reset drop time on new game
+                stepsSinceLastDrop = 0; // Reset time-wasting penalty counter
                 lastDroppedFruit = null; // Reset last dropped fruit reference
                 saveCounter = 0;
                 currentGameMaxFruit = -1; // Reset current game max on new game
@@ -2036,6 +2063,9 @@
                 if (isHeadlessMode) {
                     dropCooldownStepsRemaining = DROP_COOLDOWN_STEPS;
                 }
+                
+                // Reset time-wasting penalty counter when a drop occurs
+                stepsSinceLastDrop = 0;
                 
                 // Decrement booster cooldown counter
                 if (boosterCooldownCount > 0) {
