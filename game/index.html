@@ -526,6 +526,17 @@
                 Model not initialized
             </div>
             <div class="flex flex-col gap-3 w-full max-w-xs">
+                <div class="flex flex-col gap-2">
+                    <label for="rl-episodes-input" class="text-sm text-gray-700 text-left">Number of Episodes:</label>
+                    <input 
+                        type="number" 
+                        id="rl-episodes-input" 
+                        class="px-4 py-2 border-2 border-gray-300 rounded-lg text-gray-900 text-center font-bold text-lg focus:border-purple-500 focus:outline-none"
+                        value="5"
+                        min="1"
+                        max="1000"
+                    />
+                </div>
                 <button id="rl-start-training" class="px-6 py-3 bg-purple-500 text-white font-bold rounded-lg shadow-lg text-xl hover:bg-purple-400 transition-all flex items-center justify-center gap-2">
                     <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <polygon points="5 3 19 12 5 21 5 3"></polygon>
@@ -2577,7 +2588,18 @@
                 
                 // Update status based on model state
                 if (typeof window.RL !== 'undefined' && window.RL.getModel && window.RL.getModel()) {
-                    updateRLStatus('Model initialized and ready');
+                    // Try to get metadata to show current training state
+                    const metadataStr = localStorage.getItem('fruit-merge-dqn-metadata');
+                    if (metadataStr) {
+                        try {
+                            const metadata = JSON.parse(metadataStr);
+                            updateRLStatus(`Model ready (Episode ${metadata.episodeCount || 0})`);
+                        } catch (e) {
+                            updateRLStatus('Model initialized and ready');
+                        }
+                    } else {
+                        updateRLStatus('Model initialized and ready');
+                    }
                 } else {
                     updateRLStatus('Model not initialized');
                 }
@@ -2591,6 +2613,16 @@
             async function handleStartTraining() {
                 if (isRLTraining) {
                     updateRLStatus('Training already in progress...');
+                    return;
+                }
+                
+                // Get number of episodes from input
+                const episodesInput = document.getElementById('rl-episodes-input');
+                const numEpisodes = parseInt(episodesInput.value) || 5;
+                
+                // Validate episodes input
+                if (numEpisodes < 1 || numEpisodes > 1000) {
+                    updateRLStatus('Please enter a valid number of episodes (1-1000)');
                     return;
                 }
                 
@@ -2611,13 +2643,13 @@
                             window.RL.initModel();
                         }
                         
-                        updateRLStatus(`Training in progress (${RL_TRAINING_EPISODES} episodes)...`);
+                        updateRLStatus(`Training in progress (${numEpisodes} episodes)...`);
                         
                         // Close the modal to show the game during training
                         rlControlsModal.classList.add('hidden');
                         
                         // Run training
-                        const result = await window.RL.train(RL_TRAINING_EPISODES, {
+                        const result = await window.RL.train(numEpisodes, {
                             verbose: true,
                             epsilonStart: RL_EPSILON_START,
                             epsilonEnd: RL_EPSILON_END,
