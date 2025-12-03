@@ -65,7 +65,7 @@ const MAX_TD_ERROR = 100.0;       // Maximum TD error for priority clamping
 const MIN_TD_ERROR = 1e-6;        // Minimum TD error to prevent zero priority
 const MAX_Q_VALUE = 1000.0;       // Maximum Q-value for clipping
 const GRADIENT_CLIP_NORM = 10.0;  // Maximum gradient norm for clipping
-const TAU = 0.005;                // Soft update coefficient for target network (Polyak averaging)
+const TAU = 0.001;                // Soft update coefficient for target network (changed to 0.001)
 const HUBER_DELTA = 1.0;          // Delta parameter for Huber loss
 const REWARD_CLIP_MIN = -10.0;    // Minimum reward after normalization
 const REWARD_CLIP_MAX = 10.0;     // Maximum reward after normalization
@@ -396,23 +396,29 @@ export function initTraining(context) {
     window.RL = window.RL || {};
     
     // Model configuration
-    const BASE_STATE_SIZE = 155;  // 155-element base state vector
+    const BASE_STATE_SIZE = 155;  // 155-element base state vector (legacy)
     const FRAME_STACK_SIZE = 3;   // Number of frames to stack
     const STATE_SIZE = BASE_STATE_SIZE * FRAME_STACK_SIZE;  // 155 * 3 = 465-element stacked state vector
-    const NUM_ACTIONS = 4;   // 4 discrete actions (left, right, center, drop)
+    const NUM_ACTIONS = 10;  // 10 discrete actions (column 0-9)
     
-    // Spatial grid configuration for CNN
+    // Spatial grid configuration for CNN with embedding
     const GRID_WIDTH = 10;   // Grid width for spatial representation
     const GRID_HEIGHT = 15;  // Grid height for spatial representation
-    const GRID_CHANNELS = 4; // Number of channels per frame (board fruits, current fruit, next fruit, booster)
-    const GRID_TOTAL_CHANNELS = GRID_CHANNELS * FRAME_STACK_SIZE; // Total channels with frame stacking (4 * 3 = 12)
+    const MAX_FRUIT_LEVEL = 10; // Maximum fruit level (0-9) + empty (10)
+    const EMBEDDING_DIM = 16; // Embedding dimension for fruit types
     
-    // CNN architecture configuration
-    const CNN_FILTERS_1 = 32;  // First conv layer filters
-    const CNN_FILTERS_2 = 64;  // Second conv layer filters
-    const CNN_KERNEL_SIZE = 3; // Kernel size for conv layers
-    const CNN_STRIDE = 1;      // Stride for conv layers
-    const CNN_DENSE_UNITS = 256; // Dense layer after CNN (replaces dense layers 1-4)
+    // Additional input features (concatenated after CNN)
+    const ADDITIONAL_FEATURES = 4; // [currentX, currentY, currentFruitType, nextFruitType]
+    
+    // CNN architecture configuration - NEW DEEPER ARCHITECTURE
+    const CNN_FILTERS_1 = 32;   // First conv layer filters
+    const CNN_FILTERS_2 = 64;   // Second conv layer filters
+    const CNN_FILTERS_3 = 64;   // Third conv layer filters
+    const CNN_FILTERS_4 = 128;  // Fourth conv layer filters
+    const CNN_KERNEL_SIZE = 3;  // Kernel size for conv layers
+    const CNN_STRIDE = 1;       // Stride for conv layers
+    const CNN_DENSE_UNITS = 256; // Dense layer after CNN
+    const NOISY_DENSE_UNITS = 256; // NoisyDense layer units
     
     // Original dense architecture (not used with CNN)
     const HIDDEN_UNITS_1 = 512; // First hidden layer units
@@ -426,17 +432,17 @@ export function initTraining(context) {
     
     // Training configuration
     const DEFAULT_BATCH_SIZE = 128;
-    const DEFAULT_REPLAY_BUFFER_SIZE = 100000;
-    const DEFAULT_MIN_BUFFER_SIZE = 2000; // Increased minimum samples before training starts (stability)
+    const DEFAULT_REPLAY_BUFFER_SIZE = 300000; // Increased to 300k (200k-500k range)
+    const DEFAULT_MIN_BUFFER_SIZE = 20000; // Warmup steps = 20k before training starts
     const DEFAULT_TRAIN_EVERY_N_STEPS = 2;
-    const DEFAULT_TARGET_UPDATE_EVERY = 1; // Update target model every training step (soft updates)
-    const USE_SOFT_UPDATE = true; // Use soft updates (Polyak averaging) instead of hard updates
+    const DEFAULT_TARGET_UPDATE_EVERY = 1000; // Hard update every 1000 steps
+    const USE_SOFT_UPDATE = false; // Use hard updates every 1000 steps (changed from soft)
     const N_STEP_RETURNS = 3; // N-step returns for multi-step DQN
     
-    // Epsilon-greedy defaults
-    const DEFAULT_EPSILON = 0.1;
-    const DEFAULT_EPSILON_START = 1.0;
-    const DEFAULT_EPSILON_END = 0.1;
+    // Epsilon-greedy defaults (added on top of NoisyNet)
+    const DEFAULT_EPSILON = 0.01;
+    const DEFAULT_EPSILON_START = 0.4;  // Start with epsilon = 0.4
+    const DEFAULT_EPSILON_END = 0.01;    // Decay to 0.01
     const DEFAULT_EPSILON_DECAY = 0.995;
     
     // Physics timestep (60 FPS equivalent)
@@ -445,16 +451,17 @@ export function initTraining(context) {
     // Maximum steps per episode to prevent infinite loops
     const MAX_STEPS_PER_EPISODE = 10000;
     
-    // Reward shaping constants (normalized - divided by 10 for stability)
-    const REWARD_MERGE = 0.1;           // +0.1 for every fruit merge (normalized)
-    const REWARD_LARGE_FRUIT = 0.5;     // +0.5 for creating large/rare fruit (level >= 5)
-    const REWARD_STEP_PENALTY = -0.001; // -0.001 penalty per step to encourage faster play
-    const REWARD_FRUIT_DROP = 0.01;     // +0.01 for each fruit dropped
-    const REWARD_GAME_OVER = -1.0;      // -1 on game over (normalized)
-    const REWARD_TIME_WASTING_PENALTY = -0.01; // -0.01 penalty per step after 5 seconds without drop
-    const LARGE_FRUIT_THRESHOLD = 6;    // Fruit level 6 or higher is considered "large"
-    const TIME_WASTING_PENALTY_STEPS = 300; // 5 seconds at 60 FPS
-    const FORCED_DROP_STEPS = 600; // 10 seconds at 60 FPS
+    // Reward shaping constants - NEW REWARD STRUCTURE
+    const REWARD_VALID_PLACEMENT = 0.05;     // +0.05 for any valid fruit placement
+    const REWARD_TOUCHING_SAME_TYPE = 0.10;  // +0.10 if fruit touches another fruit of same type
+    const REWARD_HEIGHT_DECREASE = 0.05;     // +0.05 if tower height decreases
+    const REWARD_HEIGHT_INCREASE = -0.05;    // -0.05 if tower height increases
+    const REWARD_MERGE = 0.1;                // Keep existing merge reward
+    const REWARD_GAME_OVER = -2.0;           // -2 for game over (overflow top)
+    const LARGE_FRUIT_THRESHOLD = 6;         // Fruit level 6 or higher is considered "large"
+    
+    // Track previous tower height for height-based rewards
+    let previousTowerHeight = 0;
     
     // Model references
     let model = null;
@@ -468,52 +475,55 @@ export function initTraining(context) {
     let previousMaxFruitLevel = -1;
     
     /**
-     * Compute shaped reward based on game events.
-     * Never returns zero - always applies at least the step penalty.
+     * Compute shaped reward based on game events - NEW REWARD STRUCTURE.
+     * Returns rewards on every step, not only merges.
      * 
      * Reward components:
-     * - +0.1 for every fruit merge (detected via score increase)
-     * - +0.5 for creating a large/rare fruit (level >= 6)
-     * - +0.01 for each fruit dropped
-     * - -0.001 step penalty to encourage faster play
-     * - -0.01 time-wasting penalty per step after 5 seconds without drop
-     * - -1.0 on game over
+     * - +0.05 for any valid fruit placement
+     * - +0.10 if the fruit touches another fruit of the same type
+     * - +0.05 if tower height decreases
+     * - -0.05 if tower height increases
+     * - +mergeReward (keep existing) for merges
+     * - -2 for game over (overflow top)
      * 
      * @param {number} scoreDelta - Change in score since last step
-     * @param {number} currentMaxFruit - Current maximum fruit level on board
+     * @param {number} currentTowerHeight - Current tower height (highest fruit Y position)
      * @param {boolean} isGameOver - Whether the game just ended
-     * @param {boolean} wasDrop - Whether the action was a fruit drop (action 3)
-     * @param {number} stepsSinceLastDrop - Number of steps since last fruit drop
-     * @returns {{shapedReward: number, components: {merge: number, largeFruit: number, fruitDrop: number, stepPenalty: number, timeWastingPenalty: number, gameOver: number}}}
+     * @param {boolean} wasValidPlacement - Whether a fruit was placed (column action taken)
+     * @param {boolean} touchesSameType - Whether the placed fruit touches same type
+     * @returns {{shapedReward: number, components: {validPlacement: number, touchingSameType: number, heightDecrease: number, heightIncrease: number, merge: number, gameOver: number}}}
      */
-    function computeShapedReward(scoreDelta, currentMaxFruit, isGameOver, wasDrop, stepsSinceLastDrop) {
+    function computeShapedReward(scoreDelta, currentTowerHeight, isGameOver, wasValidPlacement, touchesSameType) {
         const components = {
+            validPlacement: 0,
+            touchingSameType: 0,
+            heightDecrease: 0,
+            heightIncrease: 0,
             merge: 0,
-            largeFruit: 0,
-            fruitDrop: 0,
-            stepPenalty: REWARD_STEP_PENALTY, // Always apply step penalty (negative value)
-            timeWastingPenalty: 0,
             gameOver: 0
         };
+        
+        // Valid fruit placement reward
+        if (wasValidPlacement) {
+            components.validPlacement = REWARD_VALID_PLACEMENT;
+        }
+        
+        // Touching same type reward
+        if (touchesSameType) {
+            components.touchingSameType = REWARD_TOUCHING_SAME_TYPE;
+        }
+        
+        // Tower height change rewards
+        const heightDelta = currentTowerHeight - previousTowerHeight;
+        if (heightDelta < -0.01) { // Height decreased (tower got shorter)
+            components.heightDecrease = REWARD_HEIGHT_DECREASE;
+        } else if (heightDelta > 0.01) { // Height increased (tower got taller)
+            components.heightIncrease = REWARD_HEIGHT_INCREASE;
+        }
         
         // Detect merge: if score increased, a merge occurred
         if (scoreDelta > 0) {
             components.merge = REWARD_MERGE;
-        }
-        
-        // Detect large fruit creation: if max fruit level increased to >= threshold
-        if (currentMaxFruit >= LARGE_FRUIT_THRESHOLD && currentMaxFruit > previousMaxFruitLevel) {
-            components.largeFruit = REWARD_LARGE_FRUIT;
-        }
-        
-        // Fruit drop reward: +1 for each fruit dropped
-        if (wasDrop) {
-            components.fruitDrop = REWARD_FRUIT_DROP;
-        }
-        
-        // Time-wasting penalty: apply if agent hasn't dropped a fruit for more than 5 seconds
-        if (stepsSinceLastDrop > TIME_WASTING_PENALTY_STEPS) {
-            components.timeWastingPenalty = REWARD_TIME_WASTING_PENALTY;
         }
         
         // Game over penalty
@@ -522,10 +532,12 @@ export function initTraining(context) {
         }
         
         // Update tracking variables
-        previousMaxFruitLevel = currentMaxFruit;
+        previousTowerHeight = currentTowerHeight;
         
-        // Total shaped reward - at minimum we have the negative step penalty
-        const shapedReward = components.merge + components.largeFruit + components.fruitDrop + components.stepPenalty + components.timeWastingPenalty + components.gameOver;
+        // Total shaped reward
+        const shapedReward = components.validPlacement + components.touchingSameType + 
+                            components.heightDecrease + components.heightIncrease + 
+                            components.merge + components.gameOver;
         
         return { shapedReward, components };
     }
@@ -535,7 +547,31 @@ export function initTraining(context) {
      */
     function resetRewardShaping() {
         previousScore = 0;
-        previousMaxFruitLevel = -1;
+        previousTowerHeight = 0;
+    }
+    
+    /**
+     * Get the tower height (highest fruit Y position) from state.
+     * State format: [currentX, currentY, currentFruit, nextFruit, booster, ...boardFruits]
+     * Board fruits are at positions 5+, with 3 values each (x, y, level)
+     * 
+     * @param {Float32Array|number[]} state - The state array
+     * @returns {number} Tower height (0-1, highest Y position of fruits)
+     */
+    function getTowerHeightFromState(state) {
+        let maxY = 0; // Lowest point (0 is top, 1 is bottom)
+        
+        // Board fruits start at index 5, each has 3 values (x, y, normalizedLevel)
+        for (let i = 5; i + 2 < state.length; i += 3) {
+            const normalizedY = state[i + 1];
+            const normalizedLevel = state[i + 2];
+            if (normalizedLevel > 0 && normalizedY > maxY) {
+                maxY = normalizedY;
+            }
+        }
+        
+        // Return 1 - maxY because higher Y = lower on screen, we want tower height
+        return 1 - maxY;
     }
     
     /**
@@ -548,14 +584,14 @@ export function initTraining(context) {
      */
     function getMaxFruitLevelFromState(state) {
         let maxLevel = -1;
-        const MAX_FRUIT_LEVEL = 9; // Watermelon is level 9
+        const MAX_FRUIT_LEVEL_CONST = 9; // Watermelon is level 9
         
         // Board fruits start at index 5, each has 3 values (x, y, normalizedLevel)
         for (let i = 5; i + 2 < state.length; i += 3) {
             const normalizedLevel = state[i + 2];
             if (normalizedLevel > 0) {
                 // Convert normalized level (0-1) back to actual level (0-9)
-                const level = Math.round(normalizedLevel * MAX_FRUIT_LEVEL);
+                const level = Math.round(normalizedLevel * MAX_FRUIT_LEVEL_CONST);
                 if (level > maxLevel) {
                     maxLevel = level;
                 }
@@ -690,8 +726,9 @@ export function initTraining(context) {
     }
     
     /**
-     * Convert a single flat state frame (155 elements) to a spatial grid representation.
+     * Convert a single flat state frame (155 elements) to integer board matrix + additional features.
      * 
+     * NEW STATE REPRESENTATION:
      * The flat state format is:
      * - [0]: Current fruit X (0-1)
      * - [1]: Current fruit Y (0-1)
@@ -700,25 +737,29 @@ export function initTraining(context) {
      * - [4]: Booster available (0 or 1)
      * - [5-154]: Board fruits, 50 fruits * 3 values (x, y, level)
      * 
-     * The spatial grid is GRID_WIDTH x GRID_HEIGHT x GRID_CHANNELS:
-     * - Channel 0: Board fruits (fruit level at each grid cell, max if multiple fruits)
-     * - Channel 1: Current falling fruit (current fruit level at its grid position)
-     * - Channel 2: Next fruit level (constant across all cells)
-     * - Channel 3: Booster availability (constant across all cells)
+     * Output format:
+     * - boardMatrix: GRID_HEIGHT x GRID_WIDTH integer matrix with fruitID (0..maxFruit)
+     *   - 0 = empty cell
+     *   - 1-10 = fruit levels 0-9 (add 1 to distinguish from empty)
+     * - additionalFeatures: [currentX, currentY, currentFruitType, nextFruitType]
      * 
      * @param {Float32Array|number[]} flatState - 155-element flat state
-     * @param {Float32Array} gridBuffer - Output buffer of size GRID_WIDTH * GRID_HEIGHT * GRID_CHANNELS
+     * @returns {{boardMatrix: Int32Array, additionalFeatures: Float32Array}}
      */
-    function convertFlatStateToGrid(flatState, gridBuffer) {
-        // Clear the grid buffer
-        gridBuffer.fill(0);
+    function convertFlatStateToIntegerBoard(flatState) {
+        // Create integer board matrix (GRID_HEIGHT x GRID_WIDTH)
+        const boardMatrix = new Int32Array(GRID_HEIGHT * GRID_WIDTH);
+        boardMatrix.fill(0); // 0 = empty
         
         // Extract metadata from flat state
         const currentX = flatState[0];
         const currentY = flatState[1];
-        const currentLevel = flatState[2];
-        const nextLevel = flatState[3];
-        const boosterAvailable = flatState[4];
+        const currentLevel = flatState[2]; // normalized 0-1
+        const nextLevel = flatState[3]; // normalized 0-1
+        
+        // Convert normalized levels to fruit IDs (1-10, where 0=empty)
+        const currentFruitID = Math.round(currentLevel * 9) + 1; // 1-10
+        const nextFruitID = Math.round(nextLevel * 9) + 1; // 1-10
         
         // Helper function to convert normalized position to grid indices
         function posToGridIndex(normX, normY) {
@@ -730,67 +771,50 @@ export function initTraining(context) {
             return { x: clampedX, y: clampedY };
         }
         
-        // Helper function to get flat index in grid buffer
-        function getGridBufferIndex(gridX, gridY, channel) {
-            return (gridY * GRID_WIDTH + gridX) * GRID_CHANNELS + channel;
-        }
-        
-        // Channel 0: Board fruits
+        // Fill board matrix with board fruits
         // Process all board fruits (starting at index 5)
         for (let i = 5; i < flatState.length; i += 3) {
             const fruitX = flatState[i];
             const fruitY = flatState[i + 1];
-            const fruitLevel = flatState[i + 2];
+            const fruitLevel = flatState[i + 2]; // normalized 0-1
             
             // Skip if no fruit at this slot (level is 0)
             if (fruitLevel === 0) continue;
             
             const { x: gridX, y: gridY } = posToGridIndex(fruitX, fruitY);
-            const idx = getGridBufferIndex(gridX, gridY, 0);
+            const idx = gridY * GRID_WIDTH + gridX;
             
-            // Take max fruit level if multiple fruits in same cell
-            gridBuffer[idx] = Math.max(gridBuffer[idx], fruitLevel);
+            // Convert normalized level to fruit ID (1-10)
+            const fruitID = Math.round(fruitLevel * 9) + 1;
+            
+            // Take max fruit ID if multiple fruits in same cell (shouldn't happen often)
+            boardMatrix[idx] = Math.max(boardMatrix[idx], fruitID);
         }
         
-        // Channel 1: Current falling fruit
-        if (currentLevel > 0) {
-            const { x: gridX, y: gridY } = posToGridIndex(currentX, currentY);
-            const idx = getGridBufferIndex(gridX, gridY, 1);
-            gridBuffer[idx] = currentLevel;
-        }
+        // Create additional features vector
+        const additionalFeatures = new Float32Array(ADDITIONAL_FEATURES);
+        additionalFeatures[0] = currentX; // normalized X position
+        additionalFeatures[1] = currentY; // normalized Y position
+        additionalFeatures[2] = currentFruitID / 10.0; // normalized fruit type (0.1 - 1.0)
+        additionalFeatures[3] = nextFruitID / 10.0; // normalized fruit type (0.1 - 1.0)
         
-        // Channel 2: Next fruit level (constant across all cells)
-        const channel2Offset = 2;
-        for (let y = 0; y < GRID_HEIGHT; y++) {
-            const rowOffset = y * GRID_WIDTH * GRID_CHANNELS + channel2Offset;
-            for (let x = 0; x < GRID_WIDTH; x++) {
-                gridBuffer[rowOffset + x * GRID_CHANNELS] = nextLevel;
-            }
-        }
-        
-        // Channel 3: Booster availability (constant across all cells)
-        const channel3Offset = 3;
-        for (let y = 0; y < GRID_HEIGHT; y++) {
-            const rowOffset = y * GRID_WIDTH * GRID_CHANNELS + channel3Offset;
-            for (let x = 0; x < GRID_WIDTH; x++) {
-                gridBuffer[rowOffset + x * GRID_CHANNELS] = boosterAvailable;
-            }
-        }
+        return { boardMatrix, additionalFeatures };
     }
     
     /**
-     * Convert stacked flat state (3 frames * 155 elements = 465) to stacked spatial grid.
-     * Output shape: GRID_WIDTH x GRID_HEIGHT x (GRID_CHANNELS * FRAME_STACK_SIZE)
+     * Convert stacked flat state (3 frames * 155 elements = 465) to stacked integer board + features.
+     * 
+     * NEW STATE REPRESENTATION:
+     * Output format:
+     * - boardMatrices: FRAME_STACK_SIZE x GRID_HEIGHT x GRID_WIDTH integer matrices
+     * - additionalFeatures: Concatenated features from all frames (FRAME_STACK_SIZE * ADDITIONAL_FEATURES)
      * 
      * @param {Float32Array} stackedFlatState - 465-element stacked flat state
-     * @returns {Float32Array} Grid buffer of size GRID_WIDTH * GRID_HEIGHT * GRID_TOTAL_CHANNELS
+     * @returns {{boardMatrices: Int32Array[], additionalFeatures: Float32Array}}
      */
-    function convertStackedStateToGrid(stackedFlatState) {
-        const gridSize = GRID_WIDTH * GRID_HEIGHT * GRID_TOTAL_CHANNELS;
-        const stackedGrid = new Float32Array(gridSize);
-        
-        // Temporary buffer for single frame grid conversion
-        const tempGridBuffer = new Float32Array(GRID_WIDTH * GRID_HEIGHT * GRID_CHANNELS);
+    function convertStackedStateToIntegerBoards(stackedFlatState) {
+        const boardMatrices = [];
+        const allAdditionalFeatures = new Float32Array(FRAME_STACK_SIZE * ADDITIONAL_FEATURES);
         
         // Convert each frame
         for (let frameIdx = 0; frameIdx < FRAME_STACK_SIZE; frameIdx++) {
@@ -798,64 +822,76 @@ export function initTraining(context) {
             const frameOffset = frameIdx * BASE_STATE_SIZE;
             const singleFrame = stackedFlatState.subarray(frameOffset, frameOffset + BASE_STATE_SIZE);
             
-            // Convert to grid
-            convertFlatStateToGrid(singleFrame, tempGridBuffer);
+            // Convert to integer board + features
+            const { boardMatrix, additionalFeatures } = convertFlatStateToIntegerBoard(singleFrame);
             
-            // Copy to stacked grid with channel offset
-            for (let y = 0; y < GRID_HEIGHT; y++) {
-                for (let x = 0; x < GRID_WIDTH; x++) {
-                    for (let c = 0; c < GRID_CHANNELS; c++) {
-                        const srcIdx = (y * GRID_WIDTH + x) * GRID_CHANNELS + c;
-                        // Stack channels: frame 0 channels 0-3, frame 1 channels 4-7, frame 2 channels 8-11
-                        const dstChannel = frameIdx * GRID_CHANNELS + c;
-                        const dstIdx = (y * GRID_WIDTH + x) * GRID_TOTAL_CHANNELS + dstChannel;
-                        stackedGrid[dstIdx] = tempGridBuffer[srcIdx];
-                    }
-                }
+            boardMatrices.push(boardMatrix);
+            
+            // Copy additional features to the combined array
+            const featureOffset = frameIdx * ADDITIONAL_FEATURES;
+            for (let i = 0; i < ADDITIONAL_FEATURES; i++) {
+                allAdditionalFeatures[featureOffset + i] = additionalFeatures[i];
             }
         }
         
-        return stackedGrid;
+        return { boardMatrices, additionalFeatures: allAdditionalFeatures };
     }
     
     /**
-     * Convert a batch of flat states to grid tensor for GPU-accelerated processing.
-     * This function runs on the CPU but allows the model to run fully on GPU.
+     * Convert a batch of flat states to model inputs for GPU-accelerated processing.
+     * NEW: Returns board integer tensors for embedding + additional features tensor.
      * 
      * @param {Float32Array} flatStates - Flat states array (batchSize * STATE_SIZE)
      * @param {number} batchSize - Number of states in the batch
-     * @returns {tf.Tensor4D} Grid tensor with shape [batchSize, GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS]
+     * @returns {{boardTensor: tf.Tensor3D, featuresTensor: tf.Tensor2D}} 
+     *          boardTensor shape: [batchSize, GRID_HEIGHT, GRID_WIDTH]
+     *          featuresTensor shape: [batchSize, FRAME_STACK_SIZE * ADDITIONAL_FEATURES]
      */
-    function convertBatchToGridTensor(flatStates, batchSize) {
-        // Pre-allocate the grid data array
-        const gridSize = GRID_HEIGHT * GRID_WIDTH * GRID_TOTAL_CHANNELS;
-        const batchGridData = new Float32Array(batchSize * gridSize);
-        
-        // Reuse buffer for single grid conversion to reduce allocations
-        const tempGridBuffer = new Float32Array(gridSize);
+    function convertBatchToModelInputs(flatStates, batchSize) {
+        // Pre-allocate arrays
+        const boardSize = GRID_HEIGHT * GRID_WIDTH;
+        const batchBoardData = new Int32Array(batchSize * boardSize);
+        const featuresSize = FRAME_STACK_SIZE * ADDITIONAL_FEATURES;
+        const batchFeaturesData = new Float32Array(batchSize * featuresSize);
         
         // Convert each state in the batch
         for (let b = 0; b < batchSize; b++) {
             const stateOffset = b * STATE_SIZE;
-            const gridOffset = b * gridSize;
             
             // Extract single stacked state
             const singleState = flatStates.subarray(stateOffset, stateOffset + STATE_SIZE);
             
-            // Convert to grid (reuses tempGridBuffer)
-            const gridData = convertStackedStateToGrid(singleState);
+            // Convert to integer boards + features
+            const { boardMatrices, additionalFeatures } = convertStackedStateToIntegerBoards(singleState);
             
-            // Copy to batch array
-            for (let i = 0; i < gridSize; i++) {
-                batchGridData[gridOffset + i] = gridData[i];
+            // Use only the most recent frame's board (last frame in stack)
+            // This simplifies the model architecture
+            const mostRecentBoard = boardMatrices[FRAME_STACK_SIZE - 1];
+            const boardOffset = b * boardSize;
+            for (let i = 0; i < boardSize; i++) {
+                batchBoardData[boardOffset + i] = mostRecentBoard[i];
+            }
+            
+            // Copy all additional features
+            const featuresOffset = b * featuresSize;
+            for (let i = 0; i < featuresSize; i++) {
+                batchFeaturesData[featuresOffset + i] = additionalFeatures[i];
             }
         }
         
-        // Create and return the 4D tensor
-        return tf.tensor4d(
-            batchGridData,
-            [batchSize, GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS]
+        // Create tensors
+        const boardTensor = tf.tensor3d(
+            batchBoardData,
+            [batchSize, GRID_HEIGHT, GRID_WIDTH],
+            'int32'
         );
+        
+        const featuresTensor = tf.tensor2d(
+            batchFeaturesData,
+            [batchSize, featuresSize]
+        );
+        
+        return { boardTensor, featuresTensor };
     }
     
     /**
@@ -1074,29 +1110,48 @@ export function initTraining(context) {
     }
     
     /**
-     * Create a Q-network model with CNN + NoisyNet + Dueling DQN architecture.
+     * Create a Q-network model with NEW DEEPER CNN + Embedding + NoisyNet architecture.
      * Used for both main model and target model.
      * 
-     * Architecture:
-     * - Input: Spatial grid tensor (GRID_HEIGHT x GRID_WIDTH x GRID_TOTAL_CHANNELS)
-     * - Conv2D: 32 filters, 3x3 kernel, stride 1, ReLU
-     * - Conv2D: 64 filters, 3x3 kernel, stride 1, ReLU
+     * NEW ARCHITECTURE:
+     * - Board Input: Integer matrix (GRID_HEIGHT x GRID_WIDTH) with fruit IDs
+     * - Embedding layer: (MAX_FRUIT_LEVEL+1) x EMBEDDING_DIM, output shape [15, 10, 16]
+     * - Conv2D(32, 3, relu)
+     * - Conv2D(64, 3, relu)
+     * - Conv2D(64, 3, relu)
+     * - Conv2D(128, 3, relu)
      * - Flatten
-     * - Dense: 256 units, ReLU
-     * - Split into two streams:
-     *   - Value stream: NoisyDense 1 unit (V(s))
-     *   - Advantage stream: NoisyDense 4 units (A(s,a))
-     * - Combine: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))
-     * - Output: 4 units (Q-values for each action)
-     * 
-     * Note: States are preprocessed to grid format before feeding to the model,
-     * enabling full GPU acceleration throughout the network.
+     * - Concatenate with additional features [currentX, currentY, currentFruitType, nextFruitType]
+     * - Dense(256, relu)
+     * - NoisyDense(256, relu)
+     * - Output layer: NUM_ACTIONS (10 column actions)
      * 
      * @returns {tf.LayersModel} The created model
      */
     function createQNetwork() {
-        // Input layer - spatial grid (no flat state conversion needed)
-        const input = tf.input({shape: [GRID_HEIGHT, GRID_WIDTH, GRID_TOTAL_CHANNELS]});
+        // Board input - integer matrix for embedding
+        const boardInput = tf.input({shape: [GRID_HEIGHT, GRID_WIDTH], dtype: 'int32', name: 'board_input'});
+        
+        // Additional features input
+        const featuresInput = tf.input({
+            shape: [FRAME_STACK_SIZE * ADDITIONAL_FEATURES], 
+            name: 'features_input'
+        });
+        
+        // Embedding layer: converts integer fruit IDs to dense vectors
+        // inputDim = MAX_FRUIT_LEVEL + 1 (0=empty, 1-10=fruit levels 0-9)
+        let embedded = tf.layers.embedding({
+            inputDim: MAX_FRUIT_LEVEL + 1,
+            outputDim: EMBEDDING_DIM,
+            inputLength: GRID_HEIGHT * GRID_WIDTH,
+            name: 'fruit_embedding'
+        }).apply(boardInput);
+        
+        // Reshape embedded output to [batch, GRID_HEIGHT, GRID_WIDTH, EMBEDDING_DIM]
+        embedded = tf.layers.reshape({
+            targetShape: [GRID_HEIGHT, GRID_WIDTH, EMBEDDING_DIM],
+            name: 'reshape_embedded'
+        }).apply(embedded);
         
         // First convolutional layer
         let conv = tf.layers.conv2d({
@@ -1106,7 +1161,7 @@ export function initTraining(context) {
             activation: 'relu',
             kernelInitializer: 'heNormal',
             name: 'conv2d_1'
-        }).apply(input);
+        }).apply(embedded);
         
         // Second convolutional layer
         conv = tf.layers.conv2d({
@@ -1118,70 +1173,64 @@ export function initTraining(context) {
             name: 'conv2d_2'
         }).apply(conv);
         
+        // Third convolutional layer (NEW)
+        conv = tf.layers.conv2d({
+            filters: CNN_FILTERS_3,
+            kernelSize: CNN_KERNEL_SIZE,
+            strides: CNN_STRIDE,
+            activation: 'relu',
+            kernelInitializer: 'heNormal',
+            name: 'conv2d_3'
+        }).apply(conv);
+        
+        // Fourth convolutional layer (NEW)
+        conv = tf.layers.conv2d({
+            filters: CNN_FILTERS_4,
+            kernelSize: CNN_KERNEL_SIZE,
+            strides: CNN_STRIDE,
+            activation: 'relu',
+            kernelInitializer: 'heNormal',
+            name: 'conv2d_4'
+        }).apply(conv);
+        
         // Flatten the convolutional output
-        let hidden = tf.layers.flatten({
+        let flattened = tf.layers.flatten({
             name: 'flatten'
         }).apply(conv);
         
-        // Dense layer after CNN
-        hidden = tf.layers.dense({
+        // Concatenate with additional features
+        let concatenated = tf.layers.concatenate({
+            name: 'concatenate_features'
+        }).apply([flattened, featuresInput]);
+        
+        // Dense layer after concatenation
+        let hidden = tf.layers.dense({
             units: CNN_DENSE_UNITS,
             activation: 'relu',
             kernelInitializer: 'heNormal',
-            name: 'dense_post_cnn'
+            name: 'dense_post_concat'
+        }).apply(concatenated);
+        
+        // NoisyDense layer for exploration
+        hidden = new NoisyDense({
+            units: NOISY_DENSE_UNITS,
+            activation: 'relu',
+            name: 'noisy_dense'
         }).apply(hidden);
         
-        // Value stream: outputs V(s) - a single scalar value
-        // Using NoisyDense for exploration without epsilon-greedy
-        const valueStream = new NoisyDense({
-            units: 1,
-            activation: 'linear',
-            name: 'noisy_value'
-        }).apply(hidden);
-        
-        // Advantage stream: outputs A(s,a) - one value per action
-        // Using NoisyDense for exploration without epsilon-greedy
-        const advantageStream = new NoisyDense({
+        // Output layer: Q-values for each action (10 columns)
+        const output = tf.layers.dense({
             units: NUM_ACTIONS,
             activation: 'linear',
-            name: 'noisy_advantage'
+            kernelInitializer: 'heNormal',
+            name: 'q_values'
         }).apply(hidden);
         
-        // Combine streams using dueling formula: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))
-        // This is implemented as a custom lambda layer
-        const output = tf.layers.lambda({
-            computeOutputShape: (inputShape) => {
-                // inputShape is array of shapes: [[batch, 1], [batch, NUM_ACTIONS]]
-                // Return the advantage stream shape (second input)
-                return [null, NUM_ACTIONS];
-            },
-            apply: (inputs) => {
-                return tf.tidy(() => {
-                    const value = inputs[0];  // Shape: [batch, 1]
-                    const advantage = inputs[1];  // Shape: [batch, NUM_ACTIONS]
-                    
-                    // Compute mean advantage across actions: mean(A(s,a))
-                    // keepdims=true maintains the dimension for broadcasting
-                    const advantageMean = tf.mean(advantage, 1, true);  // Shape: [batch, 1]
-                    
-                    // Compute centered advantages: A(s,a) - mean(A(s,a))
-                    const centeredAdvantage = tf.sub(advantage, advantageMean);  // Shape: [batch, NUM_ACTIONS]
-                    
-                    // Compute Q-values: V(s) + (A(s,a) - mean(A(s,a)))
-                    // Broadcasting handles the dimension alignment (value is [batch, 1] broadcast to [batch, NUM_ACTIONS])
-                    const qValues = tf.add(value, centeredAdvantage);  // Shape: [batch, NUM_ACTIONS]
-                    
-                    return qValues;
-                });
-            },
-            name: 'dueling_aggregation'
-        }).apply([valueStream, advantageStream]);
-        
-        // Create the model
+        // Create the model with two inputs
         const network = tf.model({
-            inputs: input,
+            inputs: [boardInput, featuresInput],
             outputs: output,
-            name: 'cnn_noisynet_dueling_dqn'
+            name: 'cnn_embedding_noisynet_dqn'
         });
         
         return network;
@@ -1229,20 +1278,26 @@ export function initTraining(context) {
         replayBuffer = new ReplayBuffer(DEFAULT_REPLAY_BUFFER_SIZE, STATE_SIZE);
         
         console.log('[Train] Model built and compiled successfully.');
-        console.log('[Train] Architecture: CNN + NoisyNet + Dueling DQN (GPU-accelerated)');
-        console.log('[Train]   - Input: Spatial grid tensor (15x10x12) - preprocessed from 465-element flat state');
-        console.log('[Train]   - Conv2D: 32 filters, 3x3 kernel, ReLU');
-        console.log('[Train]   - Conv2D: 64 filters, 3x3 kernel, ReLU');
-        console.log('[Train]   - Flatten + Dense: 256 units, ReLU');
-        console.log('[Train]   - Dueling streams: NoisyNet Value (1 unit) + NoisyNet Advantage (4 units)');
-        console.log('[Train]   - Output: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))');
-        console.log('[Train] Exploration: NoisyNet with factorized Gaussian noise (no epsilon-greedy)');
-        console.log('[Train] Preprocessing: States converted to grids before model input (CPU)');
-        console.log('[Train] Processing: Full GPU acceleration from Conv2D through output');
+        console.log('[Train] NEW ARCHITECTURE: Embedding + Deeper CNN + NoisyNet (GPU-accelerated)');
+        console.log('[Train]   - Board Input: Integer matrix [15, 10] with fruit IDs (0-10)');
+        console.log('[Train]   - Embedding: (11 x 16) -> Output shape [15, 10, 16]');
+        console.log('[Train]   - Conv2D(32, 3x3, ReLU)');
+        console.log('[Train]   - Conv2D(64, 3x3, ReLU)');
+        console.log('[Train]   - Conv2D(64, 3x3, ReLU)');
+        console.log('[Train]   - Conv2D(128, 3x3, ReLU)');
+        console.log('[Train]   - Flatten + Concatenate with [currentX, currentY, currentFruitType, nextFruitType]');
+        console.log('[Train]   - Dense(256, ReLU)');
+        console.log('[Train]   - NoisyDense(256, ReLU)');
+        console.log('[Train]   - Output: 10 Q-values (column actions 0-9)');
+        console.log('[Train] Actions: Column-based (0-9), drop fruit at center of selected column');
+        console.log('[Train] Exploration: NoisyNet + epsilon-greedy (ε: 0.4 → 0.01)');
+        console.log('[Train] Replay buffer: ' + DEFAULT_REPLAY_BUFFER_SIZE + ' transitions, warmup: ' + DEFAULT_MIN_BUFFER_SIZE);
+        console.log('[Train] Target network: Hard update every ' + DEFAULT_TARGET_UPDATE_EVERY + ' steps');
         console.log('[Train] Batch size: ' + DEFAULT_BATCH_SIZE);
         console.log('[Train] Learning rate decay: ' + LEARNING_RATE_INITIAL + ' → ' + LEARNING_RATE_100 + ' (100 eps) → ' + LEARNING_RATE_200 + ' (200 eps)');
         console.log('[Train] Target model initialized with same weights (hard update).');
-        console.log('[Train] Stability features enabled: Huber loss, gradient clipping, soft target updates (τ=' + TAU + ').');
+        console.log('[Train] Stability features enabled: Huber loss, gradient clipping, TAU=' + TAU);
+        console.log('[Train] NEW Reward shaping: +0.05 valid placement, +0.10 touching same, ±0.05 height, +merge, -2 game over');
         console.log('[Train] Model summary:');
         model.summary();
         
@@ -1305,7 +1360,7 @@ export function initTraining(context) {
     /**
      * Batched prediction for multiple states.
      * More efficient than individual predict calls.
-     * Converts flat states to grid format for GPU-accelerated CNN processing.
+     * NEW: Converts flat states to board integers + features for embedding-based model.
      * 
      * @param {Float32Array} statesFlat - Flattened states array (batchSize * stateSize)
      * @param {number} batchSize - Number of states in the batch
@@ -1313,34 +1368,31 @@ export function initTraining(context) {
      */
     function batchedPredict(statesFlat, batchSize) {
         return tf.tidy(() => {
-            const gridTensor = convertBatchToGridTensor(statesFlat, batchSize);
-            const qValues = model.predict(gridTensor);
+            const { boardTensor, featuresTensor } = convertBatchToModelInputs(statesFlat, batchSize);
+            const qValues = model.predict([boardTensor, featuresTensor]);
             return qValues.dataSync();
         });
     }
     
     /**
-     * Select action using the noisy Q-values.
-     * NoisyNet layers automatically provide exploration through parametric noise,
-     * so we don't need epsilon-greedy exploration.
-     * Uses tf.tidy() to prevent memory leaks.
-     * Converts flat state to grid format for GPU-accelerated CNN processing.
+     * Select action using Q-values with epsilon-greedy exploration.
+     * NEW: Uses epsilon-greedy on top of NoisyNet for better exploration.
+     * Converts flat state to board integers + features for embedding-based model.
      * 
      * @param {Float32Array} stateBuffer - Pre-allocated state buffer
-     * @param {number} epsilon - Ignored (kept for API compatibility, will log warning if non-zero)
-     * @returns {number} Action index (0-3)
+     * @param {number} epsilon - Exploration rate (0-1), use epsilon-greedy on top of NoisyNet
+     * @returns {number} Action index (0-9 for column actions)
      */
     function selectActionFromBuffer(stateBuffer, epsilon) {
-        // Warn if epsilon is provided (deprecated with NoisyNet)
-        if (epsilon > 0) {
-            console.warn('[Train] Epsilon parameter is ignored with NoisyNet. Exploration is handled automatically via noise.');
+        // Epsilon-greedy exploration on top of NoisyNet
+        if (Math.random() < epsilon) {
+            return Math.floor(Math.random() * NUM_ACTIONS);
         }
         
-        // No epsilon-greedy needed - NoisyNet provides exploration via noise
-        // Simply choose action with highest noisy Q-value
+        // Choose action with highest noisy Q-value
         return tf.tidy(() => {
-            const gridTensor = convertBatchToGridTensor(stateBuffer, 1);
-            const qValues = model.predict(gridTensor);
+            const { boardTensor, featuresTensor } = convertBatchToModelInputs(stateBuffer, 1);
+            const qValues = model.predict([boardTensor, featuresTensor]);
             return qValues.argMax(1).dataSync()[0];
         });
     }
