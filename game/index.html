@@ -1307,7 +1307,7 @@
                             window.gameAI.drop();
                         } else {
                             // Invalid action index - do nothing
-                            console.warn('[RL] Invalid action index:', actionIndex);
+                            console.warn('[RL] Invalid action index: ' + actionIndex + '. Expected 0-9 for column selection.');
                         }
                         
                         // Compute reward based on score change

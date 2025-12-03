@@ -584,14 +584,14 @@ export function initTraining(context) {
      */
     function getMaxFruitLevelFromState(state) {
         let maxLevel = -1;
-        const MAX_FRUIT_LEVEL_CONST = 9; // Watermelon is level 9
+        const MAX_ACTUAL_FRUIT_LEVEL = 9; // Watermelon is level 9
         
         // Board fruits start at index 5, each has 3 values (x, y, normalizedLevel)
         for (let i = 5; i + 2 < state.length; i += 3) {
             const normalizedLevel = state[i + 2];
             if (normalizedLevel > 0) {
                 // Convert normalized level (0-1) back to actual level (0-9)
-                const level = Math.round(normalizedLevel * MAX_FRUIT_LEVEL_CONST);
+                const level = Math.round(normalizedLevel * MAX_ACTUAL_FRUIT_LEVEL);
                 if (level > maxLevel) {
                     maxLevel = level;
                 }
@@ -757,9 +757,9 @@ export function initTraining(context) {
         const currentLevel = flatState[2]; // normalized 0-1
         const nextLevel = flatState[3]; // normalized 0-1
         
-        // Convert normalized levels to fruit IDs (1-10, where 0=empty)
-        const currentFruitID = Math.round(currentLevel * 9) + 1; // 1-10
-        const nextFruitID = Math.round(nextLevel * 9) + 1; // 1-10
+        // Convert normalized levels to fruit IDs (0-10, where 0=empty, 1-10=fruit levels 0-9)
+        const currentFruitID = currentLevel > 0 ? Math.round(currentLevel * 9) + 1 : 0;
+        const nextFruitID = nextLevel > 0 ? Math.round(nextLevel * 9) + 1 : 0;
         
         // Helper function to convert normalized position to grid indices
         function posToGridIndex(normX, normY) {
@@ -784,8 +784,8 @@ export function initTraining(context) {
             const { x: gridX, y: gridY } = posToGridIndex(fruitX, fruitY);
             const idx = gridY * GRID_WIDTH + gridX;
             
-            // Convert normalized level to fruit ID (1-10)
-            const fruitID = Math.round(fruitLevel * 9) + 1;
+            // Convert normalized level to fruit ID (0-10: 0=empty, 1-10=fruit levels 0-9)
+            const fruitID = fruitLevel > 0 ? Math.round(fruitLevel * 9) + 1 : 0;
             
             // Take max fruit ID if multiple fruits in same cell (shouldn't happen often)
             boardMatrix[idx] = Math.max(boardMatrix[idx], fruitID);
@@ -795,8 +795,9 @@ export function initTraining(context) {
         const additionalFeatures = new Float32Array(ADDITIONAL_FEATURES);
         additionalFeatures[0] = currentX; // normalized X position
         additionalFeatures[1] = currentY; // normalized Y position
-        additionalFeatures[2] = currentFruitID / 10.0; // normalized fruit type (0.1 - 1.0)
-        additionalFeatures[3] = nextFruitID / 10.0; // normalized fruit type (0.1 - 1.0)
+        // Normalize fruit IDs: 0 → 0, 1-10 → 0.1-1.0
+        additionalFeatures[2] = currentFruitID > 0 ? currentFruitID / 10.0 : 0;
+        additionalFeatures[3] = nextFruitID > 0 ? nextFruitID / 10.0 : 0;
         
         return { boardMatrix, additionalFeatures };
     }
@@ -1143,7 +1144,6 @@ export function initTraining(context) {
         let embedded = tf.layers.embedding({
             inputDim: MAX_FRUIT_LEVEL + 1,
             outputDim: EMBEDDING_DIM,
-            inputLength: GRID_HEIGHT * GRID_WIDTH,
             name: 'fruit_embedding'
         }).apply(boardInput);
         
