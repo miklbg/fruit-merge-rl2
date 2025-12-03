@@ -11,6 +11,11 @@
  * - Minimal function calls in inner loops
  * - Pre-cached references to avoid property lookups
  * 
+ * Physics stability:
+ * - Deterministic physics with fixed seed (Matter.Common._seed = 12345)
+ * - Fixed timestep (no real-time randomness)
+ * - Reduced restitution for stability
+ * 
  * @module fastSim
  */
 
@@ -36,6 +41,14 @@
  * @returns {Object} FastSim controller with run() and stop() methods
  */
 export function createFastSimController(gameContext) {
+    // Make physics deterministic - CRITICAL FOR REPRODUCIBLE TRAINING
+    // Note: This seed value should match PHYSICS_SEED in index.html
+    const PHYSICS_SEED = 12345;
+    if (typeof Matter !== 'undefined' && Matter.Common) {
+        Matter.Common._seed = PHYSICS_SEED;
+        console.log('[FastSim] Physics seed set to ' + PHYSICS_SEED + ' for deterministic behavior');
+    }
+    
     // Cache Matter.js references to avoid repeated property lookups
     const MatterEngine = Matter.Engine;
     const MatterRunner = Matter.Runner;
@@ -45,10 +58,10 @@ export function createFastSimController(gameContext) {
     let isRunning = false;
     let shouldStop = false;
     
-    // Number of valid actions (0-3: left, right, center, drop)
-    const NUM_ACTIONS = 4;
+    // Number of valid actions (0-9: column actions)
+    const NUM_ACTIONS = 10;
     
-    // Physics timestep (60 FPS equivalent)
+    // Physics timestep (60 FPS equivalent) - FIXED for determinism
     const DELTA_TIME = 1000 / 60;
     
     // Maximum steps per episode to prevent infinite loops
@@ -61,14 +74,14 @@ export function createFastSimController(gameContext) {
     /**
      * Select a random action (dummy policy)
      * Uses cached math functions for speed
-     * @returns {number} Action index (0-3)
+     * @returns {number} Action index (0-9 for column actions)
      */
     function selectRandomAction() {
         return mathFloor(mathRandom() * NUM_ACTIONS);
     }
     
     /**
-     * Run a single physics step without rendering
+     * Run a single physics step without rendering - DETERMINISTIC
      * @param {Object} engine - Matter.js engine
      */
     function stepPhysics(engine) {
