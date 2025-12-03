@@ -1277,54 +1277,37 @@
                     };
                     
                     /**
-                     * Execute a discrete RL action.
+                     * Execute a discrete RL action - NEW COLUMN-BASED ACTION SPACE.
                      * 
-                     * Action space (4 discrete actions):
-                     * - 0: Move fruit left by a small amount (dx = 0.04)
-                     * - 1: Move fruit right by a small amount (dx = 0.04)
-                     * - 2: Move fruit to center (normalized X = 0.5)
-                     * - 3: Drop fruit
+                     * Action space (10 discrete actions):
+                     * - 0-9: Drop fruit at center of column 0-9
                      * 
-                     * After 10 seconds (600 steps) without a drop, forces a drop action
-                     * regardless of the requested action.
+                     * Each action moves the fruit to the center of the specified column
+                     * and immediately drops it.
                      * 
                      * After performing the action, computes reward as:
                      *   reward = currentScore - RL.lastScore
                      * Applies a small negative penalty (-1) if game over.
                      * Updates RL.lastScore to current score.
                      * 
-                     * @param {number} actionIndex - Action index (0-3)
+                     * @param {number} actionIndex - Column index (0-9)
                      * @returns {number} Reward value (score delta, with game over penalty if applicable)
                      */
                     window.RL.step = function(actionIndex) {
-                        const dx = 0.04; // Small horizontal step size
-                        
-                        // Force drop after 10 seconds (600 steps) without dropping a fruit
-                        if (stepsSinceLastDrop >= FORCED_DROP_STEPS) {
-                            actionIndex = 3; // Force drop action
-                        }
-                        
-                        // Get current normalized X position
-                        const currentXNorm = currentPreviewX / gameWorldWidth;
-                        
-                        switch (actionIndex) {
-                            case 0: // Move left
-                                const leftX = Math.max(0, currentXNorm - dx);
-                                window.gameAI.moveTo(leftX);
-                                break;
-                            case 1: // Move right
-                                const rightX = Math.min(1, currentXNorm + dx);
-                                window.gameAI.moveTo(rightX);
-                                break;
-                            case 2: // Move to center
-                                window.gameAI.moveTo(0.5);
-                                break;
-                            case 3: // Drop fruit
-                                window.gameAI.drop();
-                                break;
-                            default:
-                                // Invalid action index - do nothing
-                                break;
+                        // Column-based action: move to column center and drop
+                        if (actionIndex >= 0 && actionIndex < 10) {
+                            // Calculate normalized X position for column center
+                            // Each column is 1/10 of the width, center is at (col + 0.5) / 10
+                            const columnX = (actionIndex + 0.5) / 10.0;
+                            
+                            // Move to column center
+                            window.gameAI.moveTo(columnX);
+                            
+                            // Drop fruit immediately
+                            window.gameAI.drop();
+                        } else {
+                            // Invalid action index - do nothing
+                            console.warn('[RL] Invalid action index:', actionIndex);
                         }
                         
                         // Compute reward based on score change
@@ -1481,7 +1464,7 @@
                             if (!groundExists) {
                                 const wallOptions = {
                                     isStatic: true,
-                                    restitution: 0.1,
+                                    restitution: 0.05, // Reduced for physics stability
                                     friction: 0.2,
                                     render: { 
                                         fillStyle: 'transparent',
@@ -1624,6 +1607,12 @@
                 bodiesToRemoveSet.clear();
                 bodiesToAddArray = [];
 
+                // Set deterministic physics seed BEFORE creating engine
+                if (typeof Matter !== 'undefined' && Matter.Common) {
+                    Matter.Common._seed = 12345; // Fixed seed for reproducible physics
+                    console.log('[Init] Physics seed set to 12345 for deterministic behavior');
+                }
+
                 engine = Engine.create();
                 world = engine.world;
                 world.gravity.y = 1.2; 
@@ -1650,7 +1639,7 @@
 
                 const wallOptions = {
                     isStatic: true,
-                    restitution: 0.1,
+                    restitution: 0.05, // Reduced for physics stability
                     friction: 0.2,
                     render: { 
                         fillStyle: 'transparent', // Make transparent so we can draw textures
@@ -1928,7 +1917,7 @@
                     label: 'fruit',
                     fruitLevel: level,
                     friction: 0.3,
-                    restitution: 0.2,
+                    restitution: 0.05, // Reduced for physics stability (was 0.2)
                     density: 0.001,
                     render: {
                         // Make circle slightly visible with semi-transparent fill using fruit's color
