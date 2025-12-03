@@ -42,9 +42,11 @@
  */
 export function createFastSimController(gameContext) {
     // Make physics deterministic - CRITICAL FOR REPRODUCIBLE TRAINING
+    // Note: This seed value should match PHYSICS_SEED in index.html
+    const PHYSICS_SEED = 12345;
     if (typeof Matter !== 'undefined' && Matter.Common) {
-        Matter.Common._seed = 12345; // Fixed seed for deterministic physics
-        console.log('[FastSim] Physics seed set to 12345 for deterministic behavior');
+        Matter.Common._seed = PHYSICS_SEED;
+        console.log('[FastSim] Physics seed set to ' + PHYSICS_SEED + ' for deterministic behavior');
     }
     
     // Cache Matter.js references to avoid repeated property lookups

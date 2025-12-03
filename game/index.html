@@ -622,6 +622,9 @@
 
             // --- Game Configuration ---
             
+            // Physics configuration for deterministic behavior
+            const PHYSICS_SEED = 12345; // Fixed seed for reproducible physics simulation
+            
             const SHOW_COLLISION_OUTLINES = false;
             
             const NATIVE_SCALE = 3;
@@ -1609,8 +1612,8 @@
 
                 // Set deterministic physics seed BEFORE creating engine
                 if (typeof Matter !== 'undefined' && Matter.Common) {
-                    Matter.Common._seed = 12345; // Fixed seed for reproducible physics
-                    console.log('[Init] Physics seed set to 12345 for deterministic behavior');
+                    Matter.Common._seed = PHYSICS_SEED; // Use constant for reproducible physics
+                    console.log('[Init] Physics seed set to ' + PHYSICS_SEED + ' for deterministic behavior');
                 }
 
                 engine = Engine.create();

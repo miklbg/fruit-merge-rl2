@@ -436,8 +436,8 @@ export function initTraining(context) {
     const DEFAULT_REPLAY_BUFFER_SIZE = 300000; // Increased to 300k (200k-500k range)
     const DEFAULT_MIN_BUFFER_SIZE = 20000; // Warmup steps = 20k before training starts
     const DEFAULT_TRAIN_EVERY_N_STEPS = 2;
-    const DEFAULT_TARGET_UPDATE_EVERY = 1000; // Hard update every 1000 steps
-    const USE_SOFT_UPDATE = false; // Use hard updates every 1000 steps (changed from soft)
+    const DEFAULT_TARGET_UPDATE_EVERY = 1000; // Hard update every 1000 steps (more stable than soft updates for this architecture)
+    const USE_SOFT_UPDATE = false; // Use hard updates instead of soft updates
     const N_STEP_RETURNS = 3; // N-step returns for multi-step DQN
     
     // Epsilon-greedy defaults (added on top of NoisyNet)
