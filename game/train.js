@@ -1476,16 +1476,17 @@ export function initTraining(context) {
         
         // Compute targets and TD errors using Double DQN inside tf.tidy()
         const { targets, currentQForActions } = tf.tidy(() => {
-            // Convert next states to grid format for GPU-accelerated processing
-            const nextStatesGridTensor = convertBatchToGridTensor(nextStates, actualBatchSize);
+            // Convert next states to model inputs (board + features)
+            const { boardTensor: nextBoardTensor, featuresTensor: nextFeaturesTensor } = 
+                convertBatchToModelInputs(nextStates, actualBatchSize);
             
             // DOUBLE DQN: Use ONLINE model to select actions
-            const onlineNextQValues = model.predict(nextStatesGridTensor);
+            const onlineNextQValues = model.predict([nextBoardTensor, nextFeaturesTensor]);
             const bestActions = onlineNextQValues.argMax(1).dataSync();
             
             // DOUBLE DQN: Use TARGET model to evaluate the selected actions
             // Clip target Q-values to prevent extreme values
-            const targetNextQValues = targetModel.predict(nextStatesGridTensor);
+            const targetNextQValues = targetModel.predict([nextBoardTensor, nextFeaturesTensor]);
             const targetNextQClipped = tf.clipByValue(targetNextQValues, -MAX_Q_VALUE, MAX_Q_VALUE);
             const targetNextQData = targetNextQClipped.arraySync();
             
@@ -1494,9 +1495,10 @@ export function initTraining(context) {
                 //console.log('[Train] Stability: Huber loss, gradient clipping, Q-value clipping enabled');
             }
             
-            // Convert current states to grid format
-            const statesGridTensor = convertBatchToGridTensor(states, actualBatchSize);
-            const currentQValues = model.predict(statesGridTensor);
+            // Convert current states to model inputs
+            const { boardTensor: statesBoardTensor, featuresTensor: statesFeaturesTensor } = 
+                convertBatchToModelInputs(states, actualBatchSize);
+            const currentQValues = model.predict([statesBoardTensor, statesFeaturesTensor]);
             const currentQData = currentQValues.arraySync();
             
             // Store current Q values for the taken actions (for TD error calculation)
@@ -1531,7 +1533,8 @@ export function initTraining(context) {
         });
         
         // Compute gradients and apply using optimizer with gradient clipping
-        const statesGridTensor = convertBatchToGridTensor(states, actualBatchSize);
+        const { boardTensor: statesBoardTensor, featuresTensor: statesFeaturesTensor } = 
+            convertBatchToModelInputs(states, actualBatchSize);
         
         // Create weights tensor if we have importance sampling weights
         let weightsTensor = null;
@@ -1541,7 +1544,7 @@ export function initTraining(context) {
         
         // Define loss function using Huber loss for stability
         const lossFunction = () => {
-            const predictions = model.predict(statesGridTensor);
+            const predictions = model.predict([statesBoardTensor, statesFeaturesTensor]);
             
             if (weightsTensor) {
                 // Weighted Huber loss for prioritized experience replay
@@ -1586,7 +1589,8 @@ export function initTraining(context) {
         
         // Clean up tensors
         targets.dispose();
-        statesGridTensor.dispose();
+        statesBoardTensor.dispose();
+        statesFeaturesTensor.dispose();
         loss.dispose();
         Object.values(grads).forEach(g => g.dispose());
         Object.values(clippedGrads).forEach(g => g.dispose());
@@ -1807,12 +1811,12 @@ export function initTraining(context) {
                 const episodeStartTime = performance.now();
                 const episodeStartEpsilon = currentEpsilon;
                 
-                // Track shaped reward components for logging
+                // Track shaped reward components for logging (NEW reward structure)
+                let totalValidPlacementReward = 0;
+                let totalTouchingSameTypeReward = 0;
+                let totalHeightDecreaseReward = 0;
+                let totalHeightIncreaseReward = 0;
                 let totalMergeReward = 0;
-                let totalLargeFruitReward = 0;
-                let totalFruitDropReward = 0;
-                let totalStepPenalty = 0;
-                let totalTimeWastingPenalty = 0;
                 let totalGameOverPenalty = 0;
                 
                 // Get initial state and initialize frame history with it
@@ -1852,25 +1856,30 @@ export function initTraining(context) {
                     stackFrames(nextStateBuffer);
                     const done = window.RL.isTerminal();
                     
-                    // For max fruit level, we need to extract from the raw state (not stacked)
+                    // For tower height and max fruit level, extract from raw state
                     // Reuse pre-allocated buffer for the single frame
                     const len = Math.min(rawNextState.length, BASE_STATE_SIZE);
                     for (let i = 0; i < len; i++) {
                         tempSingleFrameBuffer[i] = rawNextState[i];
                     }
-                    const currentMaxFruit = getMaxFruitLevelFromState(tempSingleFrameBuffer);
+                    const currentTowerHeight = getTowerHeightFromState(tempSingleFrameBuffer);
                     
-                    // Compute shaped reward (never zero) - action 3 is drop
-                    const wasDrop = action === 3;
-                    const { shapedReward, components } = computeShapedReward(scoreDelta, currentMaxFruit, done, wasDrop, window.RL.getStepsSinceLastDrop());
+                    // Compute shaped reward with NEW reward structure
+                    // TODO: Implement proper wasValidPlacement and touchesSameType detection
+                    // For now, assume all column actions are valid placements
+                    const wasValidPlacement = (action >= 0 && action < NUM_ACTIONS);
+                    const touchesSameType = false; // TODO: Detect from physics collisions
+                    const { shapedReward, components } = computeShapedReward(
+                        scoreDelta, currentTowerHeight, done, wasValidPlacement, touchesSameType
+                    );
                     totalReward += shapedReward;
                     
                     // Track reward components for logging
+                    totalValidPlacementReward += components.validPlacement;
+                    totalTouchingSameTypeReward += components.touchingSameType;
+                    totalHeightDecreaseReward += components.heightDecrease;
+                    totalHeightIncreaseReward += components.heightIncrease;
                     totalMergeReward += components.merge;
-                    totalLargeFruitReward += components.largeFruit;
-                    totalFruitDropReward += components.fruitDrop;
-                    totalStepPenalty += components.stepPenalty;
-                    totalTimeWastingPenalty += components.timeWastingPenalty;
                     totalGameOverPenalty += components.gameOver;
                     
                     // Add transition to n-step buffer
@@ -1984,14 +1993,14 @@ export function initTraining(context) {
                     avgLoss: avgLoss,
                     trainSteps: trainCount,
                     durationMs: episodeTime,
-                    // Reward shaping components
+                    // Reward shaping components (NEW)
                     rewardComponents: {
+                        validPlacement: totalValidPlacementReward,
+                        touchingSameType: totalTouchingSameTypeReward,
+                        heightDecrease: totalHeightDecreaseReward,
+                        heightIncrease: totalHeightIncreaseReward,
                         merge: totalMergeReward,
-                        largeFruit: totalLargeFruitReward,
-                        fruitDrop: totalFruitDropReward,
-                        stepPenalty: totalStepPenalty,
                         gameOver: totalGameOverPenalty,
-                        timeWastingPenalty: totalTimeWastingPenalty,
                     },
                     avgMeanTDError: avgMeanTDError
                 };
@@ -2007,9 +2016,10 @@ export function initTraining(context) {
                         `nextEpsilon=${currentEpsilon.toFixed(4)}`
                     );
                     console.log(
-                        `[Train] Reward components: ` +
-                        `merge=${totalMergeReward.toFixed(0)}, largeFruit=${totalLargeFruitReward.toFixed(0)}, ` +
-                        `fruitDrop=${totalFruitDropReward.toFixed(0)}, stepPenalty=${totalStepPenalty.toFixed(2)}, timeWastingPenalty=${totalTimeWastingPenalty.toFixed(2)}, gameOver=${totalGameOverPenalty.toFixed(0)}`
+                        `[Train] NEW Reward components: ` +
+                        `validPlace=${totalValidPlacementReward.toFixed(2)}, touchSame=${totalTouchingSameTypeReward.toFixed(2)}, ` +
+                        `heightDown=${totalHeightDecreaseReward.toFixed(2)}, heightUp=${totalHeightIncreaseReward.toFixed(2)}, ` +
+                        `merge=${totalMergeReward.toFixed(2)}, gameOver=${totalGameOverPenalty.toFixed(0)}`
                     );
                     if (trainCount > 0) {
                         console.log(`[Train] Mean TD error: ${avgMeanTDError.toFixed(4)}`);
@@ -2211,12 +2221,12 @@ export function initTraining(context) {
                 const episodeStartTime = performance.now();
                 const episodeStartEpsilon = currentEpsilon;
                 
-                // Track shaped reward components for logging
+                // Track shaped reward components for logging (NEW reward structure)
+                let totalValidPlacementReward = 0;
+                let totalTouchingSameTypeReward = 0;
+                let totalHeightDecreaseReward = 0;
+                let totalHeightIncreaseReward = 0;
                 let totalMergeReward = 0;
-                let totalLargeFruitReward = 0;
-                let totalFruitDropReward = 0;
-                let totalTimeWastingPenalty = 0;
-                let totalStepPenalty = 0;
                 let totalGameOverPenalty = 0;
                 
                 const rawState = window.RL.getState();
@@ -2248,25 +2258,29 @@ export function initTraining(context) {
                     stackFrames(nextStateBuffer);
                     const done = window.RL.isTerminal();
                     
-                    // For max fruit level, we need to extract from the raw state (not stacked)
+                    // For tower height extraction from raw state
                     // Reuse pre-allocated buffer for the single frame
                     const len = Math.min(rawNextState.length, BASE_STATE_SIZE);
                     for (let i = 0; i < len; i++) {
                         tempSingleFrameBuffer[i] = rawNextState[i];
                     }
-                    const currentMaxFruit = getMaxFruitLevelFromState(tempSingleFrameBuffer);
+                    const currentTowerHeight = getTowerHeightFromState(tempSingleFrameBuffer);
                     
-                    // Compute shaped reward (never zero) - action 3 is drop
-                    const wasDrop = action === 3;
-                    const { shapedReward, components } = computeShapedReward(scoreDelta, currentMaxFruit, done, wasDrop, window.RL.getStepsSinceLastDrop());
+                    // Compute shaped reward with NEW reward structure
+                    // TODO: Implement proper wasValidPlacement and touchesSameType detection
+                    const wasValidPlacement = (action >= 0 && action < NUM_ACTIONS);
+                    const touchesSameType = false; // TODO: Detect from physics collisions
+                    const { shapedReward, components } = computeShapedReward(
+                        scoreDelta, currentTowerHeight, done, wasValidPlacement, touchesSameType
+                    );
                     totalReward += shapedReward;
                     
                     // Track reward components for logging
+                    totalValidPlacementReward += components.validPlacement;
+                    totalTouchingSameTypeReward += components.touchingSameType;
+                    totalHeightDecreaseReward += components.heightDecrease;
+                    totalHeightIncreaseReward += components.heightIncrease;
                     totalMergeReward += components.merge;
-                    totalLargeFruitReward += components.largeFruit;
-                    totalFruitDropReward += components.fruitDrop;
-                    totalTimeWastingPenalty += components.timeWastingPenalty;
-                    totalStepPenalty += components.stepPenalty;
                     totalGameOverPenalty += components.gameOver;
                     
                     // Add transition to n-step buffer
@@ -2378,14 +2392,14 @@ export function initTraining(context) {
                     avgLoss: avgLoss,
                     trainSteps: trainCount,
                     durationMs: episodeTime,
-                    // Reward shaping components
+                    // Reward shaping components (NEW)
                     rewardComponents: {
+                        validPlacement: totalValidPlacementReward,
+                        touchingSameType: totalTouchingSameTypeReward,
+                        heightDecrease: totalHeightDecreaseReward,
+                        heightIncrease: totalHeightIncreaseReward,
                         merge: totalMergeReward,
-                        largeFruit: totalLargeFruitReward,
-                        fruitDrop: totalFruitDropReward,
-                        stepPenalty: totalStepPenalty,
                         gameOver: totalGameOverPenalty,
-                        timeWastingPenalty: totalTimeWastingPenalty,
                     },
                     avgMeanTDError: avgMeanTDError
                 });
@@ -2399,9 +2413,10 @@ export function initTraining(context) {
                         `nextEpsilon=${currentEpsilon.toFixed(4)}`
                     );
                     console.log(
-                        `[Train] Reward components: ` +
-                        `merge=${totalMergeReward.toFixed(0)}, largeFruit=${totalLargeFruitReward.toFixed(0)}, ` +
-                        `fruitDrop=${totalFruitDropReward.toFixed(0)}, stepPenalty=${totalStepPenalty.toFixed(2)}, timeWastingPenalty=${totalTimeWastingPenalty.toFixed(2)}, gameOver=${totalGameOverPenalty.toFixed(0)}`
+                        `[Train] NEW Reward components: ` +
+                        `validPlace=${totalValidPlacementReward.toFixed(2)}, touchSame=${totalTouchingSameTypeReward.toFixed(2)}, ` +
+                        `heightDown=${totalHeightDecreaseReward.toFixed(2)}, heightUp=${totalHeightIncreaseReward.toFixed(2)}, ` +
+                        `merge=${totalMergeReward.toFixed(2)}, gameOver=${totalGameOverPenalty.toFixed(0)}`
                     );
                     if (trainCount > 0) {
                         console.log(`[Train] Mean TD error: ${avgMeanTDError.toFixed(4)}`);
@@ -2615,13 +2630,17 @@ export function initTraining(context) {
     console.log('[Train] Optimized training module initialized.');
     console.log('[Train] Use RL.initModel() to build the model, then await RL.train(numEpisodes) to train.');
     console.log('[Train] Both RL.train() and RL.trainAsync() yield to event loop to prevent browser freeze.');
-    console.log('[Train] Model architecture: Dueling DQN with 512-512-256-128 hidden layers, NoisyNet Value stream (1 unit), NoisyNet Advantage stream (4 units).');
-    console.log('[Train] Exploration: NoisyNet with factorized Gaussian noise (no epsilon-greedy).');
+    console.log('[Train] NEW Model architecture: Embedding + Deeper CNN + NoisyNet.');
+    console.log('[Train]   - Board input [15x10] -> Embedding(11, 16) -> [15x10x16]');
+    console.log('[Train]   - Conv2D(32,3) -> Conv2D(64,3) -> Conv2D(64,3) -> Conv2D(128,3)');
+    console.log('[Train]   - Flatten + Concatenate [currentX, currentY, currentFruit, nextFruit]');
+    console.log('[Train]   - Dense(256) -> NoisyDense(256) -> Output(10 column actions)');
+    console.log('[Train] Exploration: NoisyNet + epsilon-greedy (ε: 0.4 → 0.01).');
     console.log('[Train] State representation: Frame stacking with ' + FRAME_STACK_SIZE + ' frames (' + BASE_STATE_SIZE + ' * ' + FRAME_STACK_SIZE + ' = ' + STATE_SIZE + ' elements).');
     console.log('[Train] N-step returns: n=' + N_STEP_RETURNS + ' for multi-step DQN.');
     console.log('[Train] Batch size: ' + DEFAULT_BATCH_SIZE + ', Learning rate decay: 1e-4 → 5e-5 (100 eps) → 3e-5 (200 eps).');
-    console.log('[Train] Training frequency: every ' + DEFAULT_TRAIN_EVERY_N_STEPS + ' steps.');
-    console.log('[Train] Features: Dueling Double DQN, rank-based prioritized replay (α=' + PRIORITY_ALPHA + ', β annealed ' + PRIORITY_BETA_START + '→' + PRIORITY_BETA_END + '), reward shaping.');
-    console.log('[Train] Stability: Huber loss (δ=' + HUBER_DELTA + '), gradient clipping (max=' + GRADIENT_CLIP_NORM + '), soft target updates (τ=' + TAU + ').');
-    console.log('[Train] Reward shaping (normalized): +' + REWARD_MERGE + ' merge, +' + REWARD_LARGE_FRUIT + ' large fruit, +' + REWARD_FRUIT_DROP + ' fruit drop, ' + REWARD_STEP_PENALTY + ' step penalty, ' + REWARD_TIME_WASTING_PENALTY + ' time-wasting penalty (after 5s), ' + REWARD_GAME_OVER + ' game over.');
+    console.log('[Train] Replay buffer: ' + DEFAULT_REPLAY_BUFFER_SIZE + ', warmup: ' + DEFAULT_MIN_BUFFER_SIZE + ', training frequency: every ' + DEFAULT_TRAIN_EVERY_N_STEPS + ' steps.');
+    console.log('[Train] Features: Double DQN, rank-based prioritized replay (α=' + PRIORITY_ALPHA + ', β annealed ' + PRIORITY_BETA_START + '→' + PRIORITY_BETA_END + '), NEW reward shaping.');
+    console.log('[Train] Stability: Huber loss (δ=' + HUBER_DELTA + '), gradient clipping (max=' + GRADIENT_CLIP_NORM + '), target updates every ' + DEFAULT_TARGET_UPDATE_EVERY + ' steps (τ=' + TAU + ').');
+    console.log('[Train] NEW Reward shaping: +' + REWARD_VALID_PLACEMENT + ' valid placement, +' + REWARD_TOUCHING_SAME_TYPE + ' touching same type, ±' + REWARD_HEIGHT_DECREASE + ' height change, +' + REWARD_MERGE + ' merge, ' + REWARD_GAME_OVER + ' game over.');
 }
