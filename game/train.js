@@ -404,6 +404,7 @@ export function initTraining(context) {
     // Spatial grid configuration for CNN with embedding
     const GRID_WIDTH = 10;   // Grid width for spatial representation
     const GRID_HEIGHT = 15;  // Grid height for spatial representation
+    const MAX_ACTUAL_FRUIT_LEVEL = 9; // Maximum fruit level value (0-9, watermelon is 9)
     const MAX_FRUIT_LEVEL = 10; // Maximum fruit level (0-9) + empty (10)
     const EMBEDDING_DIM = 16; // Embedding dimension for fruit types
     
@@ -758,8 +759,8 @@ export function initTraining(context) {
         const nextLevel = flatState[3]; // normalized 0-1
         
         // Convert normalized levels to fruit IDs (0-10, where 0=empty, 1-10=fruit levels 0-9)
-        const currentFruitID = currentLevel > 0 ? Math.round(currentLevel * 9) + 1 : 0;
-        const nextFruitID = nextLevel > 0 ? Math.round(nextLevel * 9) + 1 : 0;
+        const currentFruitID = currentLevel > 0 ? Math.round(currentLevel * MAX_ACTUAL_FRUIT_LEVEL) + 1 : 0;
+        const nextFruitID = nextLevel > 0 ? Math.round(nextLevel * MAX_ACTUAL_FRUIT_LEVEL) + 1 : 0;
         
         // Helper function to convert normalized position to grid indices
         function posToGridIndex(normX, normY) {
@@ -785,7 +786,7 @@ export function initTraining(context) {
             const idx = gridY * GRID_WIDTH + gridX;
             
             // Convert normalized level to fruit ID (0-10: 0=empty, 1-10=fruit levels 0-9)
-            const fruitID = fruitLevel > 0 ? Math.round(fruitLevel * 9) + 1 : 0;
+            const fruitID = fruitLevel > 0 ? Math.round(fruitLevel * MAX_ACTUAL_FRUIT_LEVEL) + 1 : 0;
             
             // Take max fruit ID if multiple fruits in same cell (shouldn't happen often)
             boardMatrix[idx] = Math.max(boardMatrix[idx], fruitID);
@@ -796,8 +797,8 @@ export function initTraining(context) {
         additionalFeatures[0] = currentX; // normalized X position
         additionalFeatures[1] = currentY; // normalized Y position
         // Normalize fruit IDs: 0 → 0, 1-10 → 0.1-1.0
-        additionalFeatures[2] = currentFruitID > 0 ? currentFruitID / 10.0 : 0;
-        additionalFeatures[3] = nextFruitID > 0 ? nextFruitID / 10.0 : 0;
+        additionalFeatures[2] = currentFruitID > 0 ? currentFruitID / MAX_FRUIT_LEVEL : 0;
+        additionalFeatures[3] = nextFruitID > 0 ? nextFruitID / MAX_FRUIT_LEVEL : 0;
         
         return { boardMatrix, additionalFeatures };
     }
